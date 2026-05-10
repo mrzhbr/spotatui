@@ -670,6 +670,7 @@ pub struct BehaviorConfigString {
   pub draw_cover_art: Option<bool>,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art_forced: Option<bool>,
+  pub keepawake_enabled: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -710,6 +711,7 @@ pub struct BehaviorConfig {
   pub draw_cover_art: bool,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art_forced: bool,
+  pub keepawake_enabled: bool,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -825,6 +827,7 @@ impl UserConfig {
         draw_cover_art: true,
         #[cfg(feature = "cover-art")]
         draw_cover_art_forced: false,
+        keepawake_enabled: true,
       },
       path_to_config: None,
     }
@@ -1131,7 +1134,9 @@ impl UserConfig {
     if let Some(draw_cover_art_forced) = behavior_config.draw_cover_art_forced {
       self.behavior.draw_cover_art_forced = draw_cover_art_forced;
     }
-
+    if let Some(keepawake_enabled) = behavior_config.keepawake_enabled {
+      self.behavior.keepawake_enabled = keepawake_enabled;
+    }
     Ok(())
   }
 
@@ -1214,6 +1219,7 @@ impl UserConfig {
       draw_cover_art: Some(self.behavior.draw_cover_art),
       #[cfg(feature = "cover-art")]
       draw_cover_art_forced: Some(self.behavior.draw_cover_art_forced),
+      keepawake_enabled: Some(self.behavior.keepawake_enabled),
     };
 
     // Helper to convert Key to config string
