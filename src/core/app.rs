@@ -1405,6 +1405,7 @@ impl App {
         self.keepawake = keepawake::Builder::default()
           .idle(true)
           .sleep(true)
+          .display(true)
           .reason("Playing music")
           .app_name("spotatui")
           .create()
