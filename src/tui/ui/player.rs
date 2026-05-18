@@ -754,21 +754,16 @@ pub fn draw_device_list(f: &mut Frame<'_>, app: &App) {
     );
   f.render_widget(instructions, instructions_area);
 
-  let no_device_message = Span::raw("No devices found: Make sure a device is active");
-
-  let items = match &app.devices {
-    Some(items) => {
-      if items.devices.is_empty() {
-        vec![ListItem::new(no_device_message)]
-      } else {
-        items
-          .devices
-          .iter()
-          .map(|device| ListItem::new(Span::raw(&device.name)))
-          .collect()
-      }
-    }
-    None => vec![ListItem::new(no_device_message)],
+  let no_device_message =
+    Span::raw("No devices found: start a Spotify device or check that Sonos is on this network");
+  let targets = app.playback_targets();
+  let items = if targets.is_empty() {
+    vec![ListItem::new(no_device_message)]
+  } else {
+    targets
+      .iter()
+      .map(|target| ListItem::new(Span::raw(target.label())))
+      .collect()
   };
 
   let mut state = ListState::default();

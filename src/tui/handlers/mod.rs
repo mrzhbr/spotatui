@@ -121,6 +121,10 @@ pub fn handle_app(key: Key, app: &mut App) {
       handle_jump_to_context(app);
     }
     _ if key == app.user_config.keys.manage_devices => {
+      app.push_navigation_stack(
+        crate::core::app::RouteId::SelectedDevice,
+        crate::core::app::ActiveBlock::SelectDevice,
+      );
       app.dispatch(IoEvent::GetDevices);
     }
     _ if key == app.user_config.keys.decrease_volume => {

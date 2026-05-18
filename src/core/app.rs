@@ -1,3 +1,4 @@
+use crate::core::playback_target::{spotify_target_from_device, PlaybackTarget, SonosRoom};
 use crate::core::sort::{SortContext, SortState};
 use crate::core::user_config::{color_to_string, UserConfig};
 use crate::infra::network::sync::{PartySession, PartyStatus};
@@ -636,6 +637,9 @@ pub struct App {
   #[allow(dead_code)]
   pub pending_stop_after_track: bool,
   pub devices: Option<DevicePayload>,
+  pub sonos_rooms: Vec<SonosRoom>,
+  pub selected_sonos_room_uuid: Option<String>,
+  pub sonos_volume: Option<u8>,
   pub queue: Option<CurrentUserQueue>,
   pub queue_selected_index: usize,
   #[cfg(feature = "cover-art")]
@@ -882,6 +886,9 @@ impl Default for App {
       last_track_id: None,
       pending_stop_after_track: false,
       devices: None,
+      sonos_rooms: Vec::new(),
+      selected_sonos_room_uuid: None,
+      sonos_volume: None,
       queue: None,
       queue_selected_index: 0,
       input: vec![],
@@ -1040,6 +1047,33 @@ impl App {
         // TODO: handle error
       };
     }
+  }
+
+  pub fn playback_targets(&self) -> Vec<PlaybackTarget> {
+    let mut targets = self
+      .devices
+      .as_ref()
+      .map(|payload| {
+        payload
+          .devices
+          .iter()
+          .filter_map(spotify_target_from_device)
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
+
+    targets.extend(
+      self
+        .sonos_rooms
+        .iter()
+        .cloned()
+        .map(|room| PlaybackTarget::Sonos {
+          is_selected: self.selected_sonos_room_uuid.as_ref() == Some(&room.uuid),
+          room,
+        }),
+    );
+
+    targets
   }
 
   #[allow(dead_code)]
@@ -1714,6 +1748,11 @@ impl App {
     if let Some(pending) = self.pending_volume {
       return pending as u32;
     }
+    if self.selected_sonos_room_uuid.is_some() {
+      return self
+        .sonos_volume
+        .unwrap_or(self.user_config.behavior.volume_percent) as u32;
+    }
     self
       .current_playback_context
       .as_ref()
@@ -1732,6 +1771,16 @@ impl App {
 
     if next_volume != current_volume {
       info!("increasing volume: {} -> {}", current_volume, next_volume);
+      if self.selected_sonos_room_uuid.is_some() {
+        self.sonos_volume = Some(next_volume);
+        self.pending_volume = Some(next_volume);
+        if !self.is_volume_change_in_flight {
+          self.is_volume_change_in_flight = true;
+          self.dispatch(IoEvent::ChangeVolume(next_volume));
+        }
+        return;
+      }
+
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]
       if self.is_native_streaming_active_for_playback() {
@@ -1774,6 +1823,15 @@ impl App {
         "decreasing volume: {} -> {}",
         current_volume, next_volume_u8
       );
+      if self.selected_sonos_room_uuid.is_some() {
+        self.sonos_volume = Some(next_volume_u8);
+        self.pending_volume = Some(next_volume_u8);
+        if !self.is_volume_change_in_flight {
+          self.is_volume_change_in_flight = true;
+          self.dispatch(IoEvent::ChangeVolume(next_volume_u8));
+        }
+        return;
+      }
 
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]

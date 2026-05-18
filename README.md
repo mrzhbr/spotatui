@@ -192,6 +192,17 @@ spotatui can play audio directly without needing spotifyd or the official Spotif
 
 See the [Native Streaming Wiki](https://github.com/LargeModGames/spotatui/wiki/Native-Streaming) for setup details.
 
+## Sonos Playback
+
+spotatui can discover Sonos rooms on your local network and show them in the `d` device menu alongside Spotify Connect devices. Select a Sonos room, then start a track, album, playlist, show, or episode from spotatui.
+
+- Requires Spotify to already be linked in the Sonos app
+- Uses local Sonos UPnP/SOAP control, not Sonos cloud OAuth
+- Works for local-network Sonos rooms that respond to SSDP discovery
+- Premium account required for Spotify playback
+
+If no Sonos rooms appear, check that the speaker is powered on, on the same network, and that multicast/SSDP traffic is not blocked. If the room appears but Spotify playback fails, link Spotify in the Sonos app first.
+
 ## Configuration
 
 A configuration file is located at `${HOME}/.config/spotatui/config.yml`.

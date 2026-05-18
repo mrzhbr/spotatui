@@ -917,9 +917,63 @@ of the app. Beware that this comes at a CPU cost!",
           devices_snapshot = Some(devices_vec);
         }
 
+        #[cfg(feature = "sonos")]
+        if saved_device_id
+          .as_deref()
+          .and_then(crate::core::playback_target::parse_sonos_persisted_id)
+          .is_some()
+        {
+          match crate::infra::sonos::discover_rooms().await {
+            Ok(rooms) => {
+              let mut app = network.app.lock().await;
+              app.sonos_rooms = rooms;
+            }
+            Err(e) => {
+              let mut app = network.app.lock().await;
+              app.set_status_message(
+                format!("Saved Sonos room unavailable during startup: {e}"),
+                6,
+              );
+            }
+          }
+        }
+
         let mut status_message = None;
         let startup_event = match saved_device_id {
           Some(saved_device_id) => {
+            #[cfg(feature = "sonos")]
+            if let Some(room_uuid) =
+              crate::core::playback_target::parse_sonos_persisted_id(&saved_device_id)
+            {
+              Some(IoEvent::TransferPlaybackToSonosRoom(
+                room_uuid.to_string(),
+                true,
+              ))
+            } else if let Some(devices_vec) = devices_snapshot.as_ref() {
+              if devices_vec
+                .iter()
+                .any(|device| device.id.as_ref() == Some(&saved_device_id))
+              {
+                Some(IoEvent::TransferPlaybackToDevice(saved_device_id, true))
+              } else {
+                status_message = Some(format!("Saved device unavailable; using {}", device_name));
+                let native_device_id = devices_vec
+                  .iter()
+                  .find(|device| device.name.eq_ignore_ascii_case(&device_name))
+                  .and_then(|device| device.id.clone());
+                if let Some(native_device_id) = native_device_id {
+                  Some(IoEvent::TransferPlaybackToDevice(native_device_id, false))
+                } else {
+                  Some(IoEvent::AutoSelectStreamingDevice(
+                    device_name.clone(),
+                    false,
+                  ))
+                }
+              }
+            } else {
+              Some(IoEvent::TransferPlaybackToDevice(saved_device_id, true))
+            }
+            #[cfg(not(feature = "sonos"))]
             if let Some(devices_vec) = devices_snapshot.as_ref() {
               if devices_vec
                 .iter()

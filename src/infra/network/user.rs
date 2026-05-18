@@ -40,18 +40,46 @@ impl UserNetwork for Network {
   }
 
   async fn get_devices(&mut self) {
-    if let Ok(devices_vec) = self.spotify.device().await {
-      let mut app = self.app.lock().await;
-      app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
-      if !devices_vec.is_empty() {
-        // Wrap Vec<Device> in DevicePayload
-        let result = rspotify::model::device::DevicePayload {
-          devices: devices_vec,
-        };
-        app.devices = Some(result);
-        // Select the first device in the list
-        app.selected_device_index = Some(0);
+    let spotify_devices = self.spotify.device().await;
+
+    #[cfg(feature = "sonos")]
+    let sonos_rooms = crate::infra::sonos::discover_rooms().await;
+
+    let mut app = self.app.lock().await;
+    app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
+
+    if let Ok(devices_vec) = spotify_devices {
+      app.devices = Some(rspotify::model::device::DevicePayload {
+        devices: devices_vec,
+      });
+    }
+
+    #[cfg(feature = "sonos")]
+    match sonos_rooms {
+      Ok(rooms) => {
+        if rooms.is_empty() {
+          if app.sonos_rooms.is_empty()
+            && app
+              .devices
+              .as_ref()
+              .is_none_or(|payload| payload.devices.is_empty())
+          {
+            app.set_status_message(
+              "No Sonos rooms found via SSDP. Check the speaker and local network multicast.",
+              6,
+            );
+          }
+        } else {
+          app.sonos_rooms = rooms;
+        }
       }
+      Err(e) => {
+        app.set_status_message(format!("No Sonos rooms found via SSDP: {e}"), 6);
+      }
+    }
+
+    if !app.playback_targets().is_empty() {
+      app.selected_device_index = Some(0);
     }
   }
 

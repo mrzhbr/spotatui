@@ -1,5 +1,8 @@
 use super::requests::spotify_get_typed_compat_for;
 use super::{IoEvent, Network};
+#[cfg(feature = "sonos")]
+use crate::core::playback_target::SonosRoom;
+use crate::core::playback_target::{parse_sonos_persisted_id, sonos_persisted_id};
 use crate::tui::ui::util::create_artist_string;
 use anyhow::anyhow;
 use chrono::Duration as ChronoDuration;
@@ -36,12 +39,40 @@ pub trait PlaybackNetwork {
   async fn repeat(&mut self, repeat_state: RepeatState);
   async fn change_volume(&mut self, volume: u8);
   async fn transfert_playback_to_device(&mut self, device_id: String, persist_device_id: bool);
+  async fn transfer_playback_to_sonos_room(&mut self, room_uuid: String, persist_device_id: bool);
   #[cfg(feature = "streaming")]
   async fn auto_select_streaming_device(&mut self, device_name: String, persist_device_id: bool);
   async fn ensure_playback_continues(&mut self, previous_track_id: String);
   #[allow(dead_code)]
   async fn add_item_to_queue(&mut self, item: PlayableId<'static>);
   async fn get_queue(&mut self);
+}
+
+#[cfg(feature = "sonos")]
+async fn selected_sonos_room(network: &Network) -> Option<SonosRoom> {
+  let app = network.app.lock().await;
+  let uuid = app.selected_sonos_room_uuid.as_ref()?;
+  app
+    .sonos_rooms
+    .iter()
+    .find(|room| &room.uuid == uuid)
+    .cloned()
+}
+
+#[cfg(feature = "sonos")]
+async fn handle_sonos_error(network: &Network, err: anyhow::Error) {
+  let mut app = network.app.lock().await;
+  let message = err.to_string();
+  if message.contains("701") || message.to_lowercase().contains("account") {
+    app.set_status_message(
+      "Sonos could not play Spotify. Link Spotify in the Sonos app first.".to_string(),
+      6,
+    );
+  } else if message.contains("Unsupported Spotify") || message.contains("cannot resume playback") {
+    app.set_status_message(message, 6);
+  } else {
+    app.handle_error(err);
+  }
 }
 
 fn trim_api_playback_uris(
@@ -462,6 +493,41 @@ impl PlaybackNetwork for Network {
         .unwrap_or(app.user_config.behavior.shuffle_enabled)
     };
 
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      let item = match crate::infra::sonos::spotify::item_from_playback_request(
+        context_id.as_ref(),
+        uris.as_deref(),
+        offset,
+      ) {
+        Ok(item) => item,
+        Err(e) => {
+          handle_sonos_error(self, e).await;
+          return;
+        }
+      };
+
+      let transport = match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => transport,
+        Err(e) => {
+          handle_sonos_error(self, e).await;
+          return;
+        }
+      };
+
+      match transport.play_spotify_item(&room, &item).await {
+        Ok(_) => {
+          let mut app = self.app.lock().await;
+          if let Some(ctx) = &mut app.current_playback_context {
+            ctx.is_playing = true;
+          }
+          app.set_status_message(format!("Playing on Sonos: {}", room.name), 4);
+        }
+        Err(e) => handle_sonos_error(self, e).await,
+      }
+      return;
+    }
+
     // Check if we should use native streaming for playback
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
@@ -610,6 +676,23 @@ impl PlaybackNetwork for Network {
   }
 
   async fn pause_playback(&mut self) {
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => match transport.pause(&room).await {
+          Ok(_) => {
+            let mut app = self.app.lock().await;
+            if let Some(ctx) = &mut app.current_playback_context {
+              ctx.is_playing = false;
+            }
+          }
+          Err(e) => handle_sonos_error(self, e).await,
+        },
+        Err(e) => handle_sonos_error(self, e).await,
+      }
+      return;
+    }
+
     // Check if using native streaming
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
@@ -639,6 +722,19 @@ impl PlaybackNetwork for Network {
   }
 
   async fn next_track(&mut self) {
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => {
+          if let Err(e) = transport.next(&room).await {
+            handle_sonos_error(self, e).await;
+          }
+        }
+        Err(e) => handle_sonos_error(self, e).await,
+      }
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -654,6 +750,19 @@ impl PlaybackNetwork for Network {
   }
 
   async fn previous_track(&mut self) {
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => {
+          if let Err(e) = transport.previous(&room).await {
+            handle_sonos_error(self, e).await;
+          }
+        }
+        Err(e) => handle_sonos_error(self, e).await,
+      }
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -669,6 +778,23 @@ impl PlaybackNetwork for Network {
   }
 
   async fn force_previous_track(&mut self) {
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => {
+          if let Err(e) = transport.previous(&room).await {
+            handle_sonos_error(self, e).await;
+          }
+          tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+          if let Err(e) = transport.previous(&room).await {
+            handle_sonos_error(self, e).await;
+          }
+        }
+        Err(e) => handle_sonos_error(self, e).await,
+      }
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -697,6 +823,19 @@ impl PlaybackNetwork for Network {
   }
 
   async fn seek(&mut self, position_ms: u32) {
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => {
+          if let Err(e) = transport.seek(&room, position_ms).await {
+            handle_sonos_error(self, e).await;
+          }
+        }
+        Err(e) => handle_sonos_error(self, e).await,
+      }
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -716,6 +855,16 @@ impl PlaybackNetwork for Network {
   }
 
   async fn shuffle(&mut self, shuffle_state: bool) {
+    #[cfg(feature = "sonos")]
+    if selected_sonos_room(self).await.is_some() {
+      let mut app = self.app.lock().await;
+      if let Some(ctx) = &mut app.current_playback_context {
+        ctx.shuffle_state = shuffle_state;
+      }
+      app.user_config.behavior.shuffle_enabled = shuffle_state;
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -743,6 +892,15 @@ impl PlaybackNetwork for Network {
   }
 
   async fn repeat(&mut self, repeat_state: RepeatState) {
+    #[cfg(feature = "sonos")]
+    if selected_sonos_room(self).await.is_some() {
+      let mut app = self.app.lock().await;
+      if let Some(ctx) = &mut app.current_playback_context {
+        ctx.repeat_state = repeat_state;
+      }
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -779,6 +937,38 @@ impl PlaybackNetwork for Network {
   /// On error we bail and clear everything so the UI falls back to whatever
   /// the API last reported.
   async fn change_volume(&mut self, volume: u8) {
+    #[cfg(feature = "sonos")]
+    if let Some(room) = selected_sonos_room(self).await {
+      match crate::infra::sonos::SonosTransport::new() {
+        Ok(transport) => match transport.set_volume(&room, volume).await {
+          Ok(_) => {
+            let mut app = self.app.lock().await;
+            app.sonos_volume = Some(volume);
+            app.is_volume_change_in_flight = false;
+            app.pending_volume = None;
+            app.last_dispatched_volume = Some(volume);
+          }
+          Err(e) => {
+            let mut app = self.app.lock().await;
+            app.is_volume_change_in_flight = false;
+            app.pending_volume = None;
+            app.last_dispatched_volume = None;
+            drop(app);
+            handle_sonos_error(self, e).await;
+          }
+        },
+        Err(e) => {
+          let mut app = self.app.lock().await;
+          app.is_volume_change_in_flight = false;
+          app.pending_volume = None;
+          app.last_dispatched_volume = None;
+          drop(app);
+          handle_sonos_error(self, e).await;
+        }
+      }
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
@@ -815,6 +1005,13 @@ impl PlaybackNetwork for Network {
   }
 
   async fn transfert_playback_to_device(&mut self, device_id: String, persist_device_id: bool) {
+    if let Some(room_uuid) = parse_sonos_persisted_id(&device_id).map(ToOwned::to_owned) {
+      self
+        .transfer_playback_to_sonos_room(room_uuid, persist_device_id)
+        .await;
+      return;
+    }
+
     #[cfg(feature = "streaming")]
     {
       let streaming_player = current_streaming_player(self).await;
@@ -858,6 +1055,7 @@ impl PlaybackNetwork for Network {
         }
       }
       app.current_playback_context = None;
+      app.selected_sonos_room_uuid = None;
 
       #[cfg(feature = "streaming")]
       {
@@ -865,6 +1063,47 @@ impl PlaybackNetwork for Network {
         app.is_streaming_active = false;
       }
     }
+  }
+
+  async fn transfer_playback_to_sonos_room(&mut self, room_uuid: String, persist_device_id: bool) {
+    let room_name = {
+      let mut app = self.app.lock().await;
+      let room = app
+        .sonos_rooms
+        .iter()
+        .find(|room| room.uuid == room_uuid)
+        .cloned();
+      let Some(room) = room else {
+        app.set_status_message(
+          "Saved Sonos room unavailable. Check that it is powered on and on this network.",
+          6,
+        );
+        return;
+      };
+
+      app.selected_sonos_room_uuid = Some(room.uuid.clone());
+      app.sonos_volume = app
+        .sonos_volume
+        .or(Some(app.user_config.behavior.volume_percent));
+      app.current_playback_context = None;
+      #[cfg(feature = "streaming")]
+      {
+        app.is_streaming_active = false;
+      }
+      room.name
+    };
+
+    if persist_device_id {
+      let persisted_id = sonos_persisted_id(&room_uuid);
+      if let Err(e) = self.client_config.set_device_id(persisted_id) {
+        let mut app = self.app.lock().await;
+        app.handle_error(anyhow!(e));
+        return;
+      }
+    }
+
+    let mut app = self.app.lock().await;
+    app.set_status_message(format!("Selected Sonos room: {room_name}"), 4);
   }
 
   #[cfg(feature = "streaming")]
