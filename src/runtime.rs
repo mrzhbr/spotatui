@@ -53,7 +53,7 @@ use rspotify::prelude::*;
 #[cfg(feature = "streaming")]
 use rspotify::AuthCodePkceSpotify;
 #[cfg(feature = "streaming")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{
   fs,
   io::{self, Write},
