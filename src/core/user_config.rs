@@ -606,6 +606,7 @@ pub struct KeyBindingsString {
   audio_analysis: Option<String>,
   #[serde(alias = "basic_view")]
   lyrics_view: Option<String>,
+  miniplayer_view: Option<String>,
   cover_art_view: Option<String>,
   add_item_to_queue: Option<String>,
   show_queue: Option<String>,
@@ -643,6 +644,7 @@ pub struct KeyBindings {
   pub copy_album_url: Key,
   pub audio_analysis: Key,
   pub lyrics_view: Key,
+  pub miniplayer_view: Key,
   pub cover_art_view: Key,
   pub add_item_to_queue: Key,
   pub show_queue: Key,
@@ -800,6 +802,7 @@ impl UserConfig {
         copy_album_url: Key::Char('C'),
         audio_analysis: Key::Char('v'),
         lyrics_view: Key::Char('B'),
+        miniplayer_view: Key::Char('T'),
         cover_art_view: Key::Char('G'),
         add_item_to_queue: Key::Char('z'),
         show_queue: Key::Char('Q'),
@@ -921,6 +924,7 @@ impl UserConfig {
     to_keys!(copy_album_url);
     to_keys!(audio_analysis);
     to_keys!(lyrics_view);
+    to_keys!(miniplayer_view);
     to_keys!(cover_art_view);
     to_keys!(add_item_to_queue);
     to_keys!(show_queue);
@@ -1321,6 +1325,7 @@ impl UserConfig {
       copy_album_url: Some(key_to_config_string(self.keys.copy_album_url)),
       audio_analysis: Some(key_to_config_string(self.keys.audio_analysis)),
       lyrics_view: Some(key_to_config_string(self.keys.lyrics_view)),
+      miniplayer_view: Some(key_to_config_string(self.keys.miniplayer_view)),
       cover_art_view: Some(key_to_config_string(self.keys.cover_art_view)),
       add_item_to_queue: Some(key_to_config_string(self.keys.add_item_to_queue)),
       show_queue: Some(key_to_config_string(self.keys.show_queue)),
@@ -1562,6 +1567,48 @@ mod tests {
     // Missing field defaults to None (not overriding the config default)
     let config: BehaviorConfigString = serde_yaml::from_str("{}").unwrap();
     assert_eq!(config.startup_behavior, None);
+  }
+
+  #[test]
+  fn miniplayer_keybinding_loads_from_yaml() {
+    use super::{KeyBindingsString, UserConfig};
+    use crate::tui::event::Key;
+
+    let keybindings: KeyBindingsString = serde_yaml::from_str("miniplayer_view: ctrl-t").unwrap();
+    let mut config = UserConfig::new();
+    config.load_keybindings(keybindings).unwrap();
+
+    assert_eq!(config.keys.miniplayer_view, Key::Ctrl('t'));
+  }
+
+  #[test]
+  fn miniplayer_keybinding_saves_to_yaml() {
+    use super::{UserConfig, UserConfigPaths};
+    use crate::tui::event::Key;
+    use std::fs;
+
+    let config_dir = std::env::temp_dir().join(format!(
+      "spotatui-miniplayer-config-test-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    ));
+    fs::create_dir_all(&config_dir).unwrap();
+    let config_file_path = config_dir.join("config.yml");
+
+    let mut config = UserConfig::new();
+    config.path_to_config = Some(UserConfigPaths {
+      config_file_path: config_file_path.clone(),
+    });
+    config.keys.miniplayer_view = Key::Ctrl('t');
+    config.save_config().unwrap();
+
+    let saved = fs::read_to_string(&config_file_path).unwrap();
+    assert!(saved.contains("miniplayer_view: ctrl-t"));
+
+    fs::remove_dir_all(config_dir).unwrap();
   }
 
   #[cfg(feature = "cover-art")]

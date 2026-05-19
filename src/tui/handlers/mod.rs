@@ -18,6 +18,7 @@ mod home;
 mod input;
 mod library;
 mod lyrics_view;
+mod miniplayer;
 mod mouse;
 mod party;
 mod playbar;
@@ -177,6 +178,13 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.lyrics_view => {
       app.push_navigation_stack(RouteId::LyricsView, ActiveBlock::LyricsView);
     }
+    _ if key == app.user_config.keys.miniplayer_view => {
+      if is_input_mode(app) {
+        handle_block_events(key, app);
+      } else {
+        toggle_miniplayer(app);
+      }
+    }
     #[cfg(feature = "cover-art")]
     _ if key == app.user_config.keys.cover_art_view => {
       app.push_navigation_stack(RouteId::CoverArtView, ActiveBlock::CoverArtView);
@@ -325,6 +333,9 @@ fn handle_block_events(key: Key, app: &mut App) {
     ActiveBlock::LyricsView => {
       lyrics_view::handler(key, app);
     }
+    ActiveBlock::MiniPlayer => {
+      miniplayer::handler(key, app);
+    }
     ActiveBlock::CoverArtView => {
       #[cfg(feature = "cover-art")]
       cover_art_view::handler(key, app);
@@ -384,7 +395,7 @@ fn handle_escape(app: &mut App) {
     ActiveBlock::Party => {
       app.pop_navigation_stack();
     }
-    ActiveBlock::LyricsView | ActiveBlock::CoverArtView => {
+    ActiveBlock::LyricsView | ActiveBlock::CoverArtView | ActiveBlock::MiniPlayer => {
       app.pop_navigation_stack();
     }
     // These are global views that have no active/inactive distinction so do nothing
@@ -405,6 +416,14 @@ fn handle_escape(app: &mut App) {
     _ => {
       app.set_current_route_state(Some(ActiveBlock::Empty), None);
     }
+  }
+}
+
+fn toggle_miniplayer(app: &mut App) {
+  if app.get_current_route().id == RouteId::MiniPlayer {
+    app.pop_navigation_stack();
+  } else {
+    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
   }
 }
 
@@ -565,6 +584,68 @@ mod tests {
 
     // In input mode, 'F' should be added to the input buffer
     assert_eq!(app.input, vec!['F']);
+  }
+
+  #[test]
+  fn miniplayer_key_pushes_miniplayer_from_normal_route() {
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+
+    handle_app(Key::Char('T'), &mut app);
+
+    let route = app.get_current_route();
+    assert_eq!(route.id, RouteId::MiniPlayer);
+    assert_eq!(route.active_block, ActiveBlock::MiniPlayer);
+  }
+
+  #[test]
+  fn miniplayer_key_exits_when_already_in_miniplayer() {
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
+
+    handle_app(Key::Char('T'), &mut app);
+
+    let route = app.get_current_route();
+    assert_eq!(route.id, RouteId::TrackTable);
+    assert_eq!(route.active_block, ActiveBlock::TrackTable);
+  }
+
+  #[test]
+  fn miniplayer_key_is_not_intercepted_in_input_mode() {
+    let mut app = App::default();
+    app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
+
+    handle_app(Key::Char('T'), &mut app);
+
+    assert_eq!(app.input, vec!['T']);
+    assert_ne!(app.get_current_route().id, RouteId::MiniPlayer);
+  }
+
+  #[test]
+  fn back_key_exits_miniplayer_handler() {
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
+
+    handle_app(app.user_config.keys.back, &mut app);
+
+    let route = app.get_current_route();
+    assert_eq!(route.id, RouteId::TrackTable);
+    assert_eq!(route.active_block, ActiveBlock::TrackTable);
+  }
+
+  #[test]
+  fn miniplayer_does_not_inherit_playbar_layout_navigation() {
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
+
+    handle_app(Key::Up, &mut app);
+
+    let route = app.get_current_route();
+    assert_eq!(route.id, RouteId::MiniPlayer);
+    assert_eq!(route.active_block, ActiveBlock::MiniPlayer);
   }
 
   #[cfg(target_os = "macos")]
