@@ -766,8 +766,10 @@ pub struct App {
   pub artist_sort: SortState,
   /// Animation frame counter for the "Liked" heart flash effect (0-10)
   pub liked_song_animation_frame: Option<u8>,
-  /// Global animation tick counter, incremented every tick (~62 FPS)
+  /// Global animation tick counter, incremented every tick.
   pub animation_tick: u64,
+  /// Last time the listening party host broadcast playback state.
+  pub last_party_sync_at: Instant,
   /// Ephemeral status message shown in the playbar
   pub status_message: Option<String>,
   /// When to clear the status message
@@ -973,6 +975,7 @@ impl Default for App {
       artist_sort: SortState::new(),
       liked_song_animation_frame: None,
       animation_tick: 0,
+      last_party_sync_at: Instant::now(),
       status_message: None,
       status_message_expires_at: None,
       party_status: PartyStatus::default(),
@@ -1372,13 +1375,16 @@ impl App {
     }
   }
 
-  pub fn update_on_tick(&mut self) {
+  pub fn update_on_tick(&mut self, elapsed: Duration) {
     // Increment global animation tick (wraps after ~9.4 quintillion ticks, effectively never)
     self.animation_tick = self.animation_tick.wrapping_add(1);
 
-    // Periodic party sync: host broadcasts state every ~2 seconds (~125 ticks at 16ms)
+    // Periodic party sync: host broadcasts state about every 2 seconds.
     // Keep this before early-return paths so sync still happens during native-streaming fast paths.
-    if self.party_status == PartyStatus::Hosting && self.animation_tick.is_multiple_of(125) {
+    if self.party_status == PartyStatus::Hosting
+      && self.last_party_sync_at.elapsed() >= Duration::from_secs(2)
+    {
+      self.last_party_sync_at = Instant::now();
       self.dispatch(IoEvent::SyncPlayback);
     }
 
@@ -1460,14 +1466,14 @@ impl App {
           .unwrap_or(0);
       } else if *is_playing {
         // Smooth incremental updates between API polls
-        let tick_rate_ms = self.user_config.behavior.tick_rate_milliseconds as u128;
+        let elapsed_ms = elapsed.as_millis();
         let duration_ms = match item {
           PlayableItem::Track(track) => track.duration.num_milliseconds() as u128,
           PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u128,
           _ => return,
         };
 
-        self.song_progress_ms = (self.song_progress_ms + tick_rate_ms).min(duration_ms);
+        self.song_progress_ms = (self.song_progress_ms + elapsed_ms).min(duration_ms);
       }
       // When paused, keep song_progress_ms unchanged
     }
@@ -2934,6 +2940,14 @@ impl App {
           value: SettingValue::Number(self.user_config.behavior.tick_rate_milliseconds as i64),
         },
         SettingItem {
+          id: "behavior.animation_tick_rate_milliseconds".to_string(),
+          name: "Animation Tick Rate (ms)".to_string(),
+          description: "Refresh rate for animation-heavy views".to_string(),
+          value: SettingValue::Number(
+            self.user_config.behavior.animation_tick_rate_milliseconds as i64,
+          ),
+        },
+        SettingItem {
           id: "behavior.enable_text_emphasis".to_string(),
           name: "Text Emphasis".to_string(),
           description: "Enable bold/italic text styling".to_string(),
@@ -3384,7 +3398,12 @@ impl App {
         }
         "behavior.tick_rate_milliseconds" => {
           if let SettingValue::Number(v) = &setting.value {
-            self.user_config.behavior.tick_rate_milliseconds = (*v).max(1) as u64;
+            self.user_config.behavior.tick_rate_milliseconds = (*v).clamp(1, 999) as u64;
+          }
+        }
+        "behavior.animation_tick_rate_milliseconds" => {
+          if let SettingValue::Number(v) = &setting.value {
+            self.user_config.behavior.animation_tick_rate_milliseconds = (*v).clamp(1, 999) as u64;
           }
         }
         "behavior.enable_text_emphasis" => {

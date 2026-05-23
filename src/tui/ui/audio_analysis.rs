@@ -22,7 +22,11 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
 
   let white = Style::default().fg(app.user_config.theme.text);
   let gray = Style::default().fg(app.user_config.theme.inactive);
-  let tick_rate = app.user_config.behavior.tick_rate_milliseconds;
+  let tick_rate = app
+    .user_config
+    .behavior
+    .animation_tick_rate_milliseconds
+    .max(1);
   let visualizer_style = app.user_config.behavior.visualizer_style;
 
   let info_block = Block::default()

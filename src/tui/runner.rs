@@ -346,6 +346,13 @@ pub async fn start_ui(
       };
 
       let current_route = app.get_current_route();
+      let current_tick_rate = if current_route.active_block == ActiveBlock::Analysis {
+        app.user_config.behavior.animation_tick_rate_milliseconds
+      } else {
+        app.user_config.behavior.tick_rate_milliseconds
+      };
+      events.set_tick_rate(current_tick_rate);
+
       terminal.draw(|f| {
         use ratatui::{prelude::Style, widgets::Block};
         f.render_widget(
@@ -465,7 +472,7 @@ pub async fn start_ui(
           handlers::mouse_handler(mouse, &mut app);
         }
       }
-      event::Event::Tick => {
+      event::Event::Tick(elapsed) => {
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         {
           use objc2_foundation::{NSDate, NSRunLoop};
@@ -473,7 +480,7 @@ pub async fn start_ui(
         }
 
         let mut app = app.lock().await;
-        app.update_on_tick();
+        app.update_on_tick(elapsed);
 
         #[cfg(feature = "streaming")]
         app.flush_pending_native_seek();
