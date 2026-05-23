@@ -1,4 +1,5 @@
 use super::key::Key;
+use crate::core::user_config::{normalize_tick_rate_milliseconds, DEFAULT_TICK_RATE_MILLISECONDS};
 use crossterm::event::{self, Event as CrosstermEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use std::{
   sync::{
@@ -23,7 +24,7 @@ impl Default for EventConfig {
   fn default() -> EventConfig {
     EventConfig {
       exit_key: Key::Ctrl('c'),
-      tick_rate: Duration::from_millis(250),
+      tick_rate: Duration::from_millis(DEFAULT_TICK_RATE_MILLISECONDS),
     }
   }
 }
@@ -59,9 +60,9 @@ impl Events {
   /// Constructs an new instance of `Events` from given config.
   pub fn with_config(config: EventConfig) -> Events {
     let (tx, rx) = mpsc::channel();
-    let tick_rate_milliseconds = Arc::new(AtomicU64::new(
-      config.tick_rate.as_millis().try_into().unwrap_or(u64::MAX),
-    ));
+    let tick_rate_milliseconds = Arc::new(AtomicU64::new(normalize_tick_rate_milliseconds(
+      config.tick_rate.as_millis().try_into().unwrap_or(i64::MAX),
+    )));
 
     let event_tx = tx.clone();
     let event_tick_rate_milliseconds = tick_rate_milliseconds.clone();
@@ -112,9 +113,12 @@ impl Events {
   }
 
   pub fn set_tick_rate(&self, tick_rate: u64) {
-    self
-      .tick_rate_milliseconds
-      .store(tick_rate.max(1), Ordering::Relaxed);
+    let tick_rate = normalize_tick_rate_milliseconds(tick_rate as i64);
+    if self.tick_rate_milliseconds.load(Ordering::Relaxed) != tick_rate {
+      self
+        .tick_rate_milliseconds
+        .store(tick_rate, Ordering::Relaxed);
+    }
   }
 
   /// Attempts to read an event.

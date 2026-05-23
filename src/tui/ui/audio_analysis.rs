@@ -1,6 +1,6 @@
 use super::util;
 use crate::core::app::App;
-use crate::core::user_config::VisualizerStyle;
+use crate::core::user_config::{normalize_tick_rate_milliseconds, VisualizerStyle};
 use ratatui::{
   buffer::Buffer,
   layout::{Constraint, Layout, Rect},
@@ -22,11 +22,8 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
 
   let white = Style::default().fg(app.user_config.theme.text);
   let gray = Style::default().fg(app.user_config.theme.inactive);
-  let tick_rate = app
-    .user_config
-    .behavior
-    .animation_tick_rate_milliseconds
-    .max(1);
+  let tick_rate = app.user_config.behavior.animation_tick_rate_milliseconds;
+  let tick_rate = normalize_tick_rate_milliseconds(tick_rate as i64);
   let visualizer_style = app.user_config.behavior.visualizer_style;
 
   let info_block = Block::default()

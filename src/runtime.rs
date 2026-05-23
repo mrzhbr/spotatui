@@ -29,7 +29,9 @@ use crate::cli;
 use crate::core::app::App;
 use crate::core::auth;
 use crate::core::config::ClientConfig;
-use crate::core::user_config::{StartupBehavior, UserConfig, UserConfigPaths};
+use crate::core::user_config::{
+  validate_tick_rate_milliseconds, StartupBehavior, UserConfig, UserConfigPaths,
+};
 #[cfg(feature = "discord-rpc")]
 use crate::infra::discord_rpc;
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
@@ -419,11 +421,10 @@ pub async fn run() -> Result<()> {
       Arg::new("tick-rate")
         .short('t')
         .long("tick-rate")
-        .help("Set the tick rate (milliseconds): the lower the number the higher the FPS.")
+        .help("Set the normal UI tick rate in milliseconds.")
         .long_help(
-          "Specify the tick rate in milliseconds: the lower the number the \
-higher the FPS. It can be nicer to have a lower value when you want to use the audio analysis view \
-of the app. Beware that this comes at a CPU cost!",
+          "Specify the normal UI tick rate in milliseconds. Lower values refresh non-animated \
+screens more often and cost more CPU. Animation-heavy views keep their separate animation tick rate.",
         ),
     )
     .arg(
@@ -566,11 +567,8 @@ of the app. Beware that this comes at a CPU cost!",
     .get_one::<String>("tick-rate")
     .and_then(|tick_rate| tick_rate.parse().ok())
   {
-    if tick_rate >= 1000 {
-      panic!("Tick rate must be below 1000");
-    } else {
-      user_config.behavior.tick_rate_milliseconds = tick_rate;
-    }
+    user_config.behavior.tick_rate_milliseconds =
+      validate_tick_rate_milliseconds(tick_rate, "Tick rate")?;
   }
 
   let mut client_config = ClientConfig::new();

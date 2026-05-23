@@ -1,5 +1,5 @@
 use crate::core::sort::{SortContext, SortState};
-use crate::core::user_config::{color_to_string, UserConfig};
+use crate::core::user_config::{color_to_string, normalize_tick_rate_milliseconds, UserConfig};
 use crate::infra::network::sync::{PartySession, PartyStatus};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
@@ -3398,12 +3398,13 @@ impl App {
         }
         "behavior.tick_rate_milliseconds" => {
           if let SettingValue::Number(v) = &setting.value {
-            self.user_config.behavior.tick_rate_milliseconds = (*v).clamp(1, 999) as u64;
+            self.user_config.behavior.tick_rate_milliseconds = normalize_tick_rate_milliseconds(*v);
           }
         }
         "behavior.animation_tick_rate_milliseconds" => {
           if let SettingValue::Number(v) = &setting.value {
-            self.user_config.behavior.animation_tick_rate_milliseconds = (*v).clamp(1, 999) as u64;
+            self.user_config.behavior.animation_tick_rate_milliseconds =
+              normalize_tick_rate_milliseconds(*v);
           }
         }
         "behavior.enable_text_emphasis" => {

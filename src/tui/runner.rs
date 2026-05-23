@@ -346,7 +346,11 @@ pub async fn start_ui(
       };
 
       let current_route = app.get_current_route();
-      let current_tick_rate = if current_route.active_block == ActiveBlock::Analysis {
+      let animation_active = matches!(
+        current_route.active_block,
+        ActiveBlock::Analysis | ActiveBlock::Home
+      ) || app.liked_song_animation_frame.is_some();
+      let current_tick_rate = if animation_active {
         app.user_config.behavior.animation_tick_rate_milliseconds
       } else {
         app.user_config.behavior.tick_rate_milliseconds
