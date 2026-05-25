@@ -12,46 +12,6 @@ pub struct UpdateInfo {
   pub latest_version: String,
 }
 
-/// Parse a human-readable delay string into seconds.
-/// Accepts: "0", "30s", "10m", "2h", "7d"
-/// Returns 0 for unrecognized/empty input (= no delay).
-pub fn parse_delay_secs(s: &str) -> Result<u64, String> {
-  let s = s.trim();
-  if s == "0" || s.is_empty() {
-    return Ok(0);
-  }
-  if let Some(n) = s.strip_suffix('d') {
-    return n
-      .trim()
-      .parse::<u64>()
-      .map(|v| v * 86400)
-      .map_err(|_| "Invalid days value".to_string());
-  }
-  if let Some(n) = s.strip_suffix('h') {
-    return n
-      .trim()
-      .parse::<u64>()
-      .map(|v| v * 3600)
-      .map_err(|_| "Invalid hours value".to_string());
-  }
-  if let Some(n) = s.strip_suffix('m') {
-    return n
-      .trim()
-      .parse::<u64>()
-      .map(|v| v * 60)
-      .map_err(|_| "Invalid minutes value".to_string());
-  }
-  if let Some(n) = s.strip_suffix('s') {
-    return n
-      .trim()
-      .parse::<u64>()
-      .map_err(|_| "Invalid seconds value".to_string());
-  }
-  // bare number treated as seconds
-  s.parse::<u64>()
-    .map_err(|_| "Invalid numeric value or unknown suffix".to_string())
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdatePendingState {
   pending_version: String,
@@ -256,21 +216,4 @@ pub fn check_for_update(do_update: bool) -> Result<()> {
   }
 
   Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-  use super::parse_delay_secs;
-
-  #[test]
-  fn test_parse_delay_secs() {
-    assert_eq!(parse_delay_secs("0"), Ok(0));
-    assert_eq!(parse_delay_secs(""), Ok(0));
-    assert_eq!(parse_delay_secs("7d"), Ok(7 * 86400));
-    assert_eq!(parse_delay_secs("2h"), Ok(2 * 3600));
-    assert_eq!(parse_delay_secs("10m"), Ok(10 * 60));
-    assert_eq!(parse_delay_secs("30s"), Ok(30));
-    assert_eq!(parse_delay_secs("120"), Ok(120));
-    assert!(parse_delay_secs("bogus").is_err());
-  }
 }

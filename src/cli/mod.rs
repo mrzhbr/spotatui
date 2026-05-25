@@ -9,4 +9,4 @@ pub use self::clap::{list_subcommand, play_subcommand, playback_subcommand, sear
 use cli_app::CliApp;
 pub use handle::handle_matches;
 #[cfg(feature = "self-update")]
-pub use update::{check_for_update, install_update_silent, parse_delay_secs, UpdateOutcome};
+pub use update::{check_for_update, install_update_silent, UpdateOutcome};

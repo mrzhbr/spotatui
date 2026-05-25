@@ -2,10 +2,7 @@ use crate::tui::event::Key;
 use anyhow::{anyhow, Result};
 use ratatui::style::{Color, Style};
 use serde::{Deserialize, Serialize};
-use std::{
-  fs,
-  path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 const FILE_NAME: &str = "config.yml";
 const CONFIG_DIR: &str = ".config";
@@ -44,6 +41,51 @@ pub fn validate_tick_rate_milliseconds(value: u64, label: &str) -> Result<u64> {
 
 pub fn normalize_tick_rate_milliseconds(value: i64) -> u64 {
   value.clamp(1, MAX_TICK_RATE_MILLISECONDS as i64) as u64
+}
+
+/// Parse a human-readable update delay into seconds.
+/// Accepts: "0", "30s", "10m", "2h", "7d", or a bare second count.
+pub fn parse_update_delay_secs(value: &str) -> Result<u64, String> {
+  let value = value.trim();
+  if value == "0" || value.is_empty() {
+    return Ok(0);
+  }
+
+  for (suffix, multiplier, label) in [
+    ("d", 86400_u64, "days"),
+    ("h", 3600_u64, "hours"),
+    ("m", 60_u64, "minutes"),
+    ("s", 1_u64, "seconds"),
+  ] {
+    if let Some(amount) = value.strip_suffix(suffix) {
+      return amount
+        .trim()
+        .parse::<u64>()
+        .map(|v| v * multiplier)
+        .map_err(|_| format!("Invalid {label} value"));
+    }
+  }
+
+  value
+    .parse::<u64>()
+    .map_err(|_| "Invalid numeric value or unknown suffix".to_string())
+}
+
+#[cfg(feature = "self-update")]
+pub fn format_update_delay_secs(secs: u64) -> String {
+  if secs >= 86400 {
+    format!("{}d", secs / 86400)
+  } else if secs >= 3600 {
+    format!("{}h", secs / 3600)
+  } else if secs >= 60 {
+    format!("{}m", secs / 60)
+  } else {
+    format!("{}s", secs)
+  }
+}
+
+fn default_app_config_dir() -> Option<PathBuf> {
+  dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -700,9 +742,7 @@ pub struct BehaviorConfigString {
   pub playbar_height_rows: Option<u16>,
   pub library_height_percent: Option<u8>,
   pub startup_behavior: Option<StartupBehavior>,
-  #[cfg(feature = "self-update")]
   pub disable_auto_update: Option<bool>,
-  #[cfg(feature = "self-update")]
   pub auto_update_delay: Option<String>,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art: Option<bool>,
@@ -746,9 +786,7 @@ pub struct BehaviorConfig {
   pub playbar_height_rows: u16,
   pub library_height_percent: u8,
   pub startup_behavior: StartupBehavior,
-  #[cfg(feature = "self-update")]
   pub disable_auto_update: bool,
-  #[cfg(feature = "self-update")]
   pub auto_update_delay: String,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art: bool,
@@ -781,7 +819,7 @@ impl UserConfig {
   /// Returns None if $HOME is not set.
   #[cfg(feature = "self-update")]
   pub fn get_app_config_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
+    default_app_config_dir()
   }
 
   pub fn new() -> UserConfig {
@@ -868,9 +906,7 @@ impl UserConfig {
         playbar_height_rows: 6,
         library_height_percent: 30,
         startup_behavior: StartupBehavior::Continue,
-        #[cfg(feature = "self-update")]
         disable_auto_update: false,
-        #[cfg(feature = "self-update")]
         auto_update_delay: "0".to_string(),
         #[cfg(feature = "cover-art")]
         draw_cover_art: true,
@@ -885,14 +921,14 @@ impl UserConfig {
   }
 
   pub fn get_or_build_paths(&mut self) -> Result<()> {
-    match dirs::home_dir() {
-      Some(home) => {
-        let path = Path::new(&home);
-        let home_config_dir = path.join(CONFIG_DIR);
-        let app_config_dir = home_config_dir.join(APP_CONFIG_DIR);
+    match default_app_config_dir() {
+      Some(app_config_dir) => {
+        let home_config_dir = app_config_dir
+          .parent()
+          .ok_or_else(|| anyhow!("Invalid app config directory"))?;
 
         if !home_config_dir.exists() {
-          fs::create_dir(&home_config_dir)?;
+          fs::create_dir(home_config_dir)?;
         }
 
         if !app_config_dir.exists() {
@@ -1188,15 +1224,14 @@ impl UserConfig {
       self.behavior.startup_behavior = startup_behavior;
     }
 
-    #[cfg(feature = "self-update")]
-    {
-      if let Some(disable_auto_update) = behavior_config.disable_auto_update {
-        self.behavior.disable_auto_update = disable_auto_update;
-      }
+    if let Some(disable_auto_update) = behavior_config.disable_auto_update {
+      self.behavior.disable_auto_update = disable_auto_update;
+    }
 
-      if let Some(auto_update_delay) = behavior_config.auto_update_delay {
-        self.behavior.auto_update_delay = auto_update_delay;
-      }
+    if let Some(auto_update_delay) = behavior_config.auto_update_delay {
+      parse_update_delay_secs(&auto_update_delay)
+        .map_err(|e| anyhow!("Invalid auto-update delay: {e}"))?;
+      self.behavior.auto_update_delay = auto_update_delay;
     }
 
     #[cfg(feature = "cover-art")]
@@ -1293,9 +1328,7 @@ impl UserConfig {
       playbar_height_rows: Some(self.behavior.playbar_height_rows),
       library_height_percent: Some(self.behavior.library_height_percent),
       startup_behavior: Some(self.behavior.startup_behavior),
-      #[cfg(feature = "self-update")]
       disable_auto_update: Some(self.behavior.disable_auto_update),
-      #[cfg(feature = "self-update")]
       auto_update_delay: Some(self.behavior.auto_update_delay.clone()),
       #[cfg(feature = "cover-art")]
       draw_cover_art: Some(self.behavior.draw_cover_art),
@@ -1674,6 +1707,30 @@ mod tests {
 
       assert!(config.load_behaviorconfig(behavior).is_err());
     }
+  }
+
+  #[test]
+  fn parse_update_delay_secs_accepts_supported_units() {
+    use super::parse_update_delay_secs;
+
+    assert_eq!(parse_update_delay_secs("0"), Ok(0));
+    assert_eq!(parse_update_delay_secs(""), Ok(0));
+    assert_eq!(parse_update_delay_secs("7d"), Ok(7 * 86400));
+    assert_eq!(parse_update_delay_secs("2h"), Ok(2 * 3600));
+    assert_eq!(parse_update_delay_secs("10m"), Ok(10 * 60));
+    assert_eq!(parse_update_delay_secs("30s"), Ok(30));
+    assert_eq!(parse_update_delay_secs("120"), Ok(120));
+    assert!(parse_update_delay_secs("bogus").is_err());
+  }
+
+  #[test]
+  fn invalid_auto_update_delay_is_rejected() {
+    use super::{BehaviorConfigString, UserConfig};
+
+    let behavior: BehaviorConfigString = serde_yaml::from_str("auto_update_delay: bogus").unwrap();
+    let mut config = UserConfig::new();
+
+    assert!(config.load_behaviorconfig(behavior).is_err());
   }
 
   #[cfg(feature = "cover-art")]
