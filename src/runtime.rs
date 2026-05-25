@@ -440,13 +440,6 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         .help("Rerun client authentication setup wizard"),
     )
     .arg(
-      Arg::new("no-update")
-        .short('U')
-        .long("no-update")
-        .action(clap::ArgAction::SetTrue)
-        .help("Skip the automatic update check on startup"),
-    )
-    .arg(
       Arg::new("completions")
         .long("completions")
         .help("Generates completions for your preferred shell")
@@ -457,20 +450,31 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     .subcommand(cli::playback_subcommand())
     .subcommand(cli::play_subcommand())
     .subcommand(cli::list_subcommand())
-    .subcommand(cli::search_subcommand())
-    // Self-update command
-    .subcommand(
-      ClapApp::new("update")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Check for and install updates")
-        .arg(
-          Arg::new("install")
-            .short('i')
-            .long("install")
-            .action(clap::ArgAction::SetTrue)
-            .help("Install the update if available"),
-        ),
-    );
+    .subcommand(cli::search_subcommand());
+
+  #[cfg(feature = "self-update")]
+  {
+    clap_app = clap_app
+      .arg(
+        Arg::new("no-update")
+          .short('U')
+          .long("no-update")
+          .action(clap::ArgAction::SetTrue)
+          .help("Skip the automatic update check on startup"),
+      )
+      .subcommand(
+        ClapApp::new("update")
+          .version(env!("CARGO_PKG_VERSION"))
+          .about("Check for and install updates")
+          .arg(
+            Arg::new("install")
+              .short('i')
+              .long("install")
+              .action(clap::ArgAction::SetTrue)
+              .help("Install the update if available"),
+          ),
+      );
+  }
 
   let matches = clap_app.clone().get_matches();
 
@@ -488,10 +492,13 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     return Ok(());
   }
 
-  // Handle self-update command (doesn't need Spotify auth)
-  if let Some(update_matches) = matches.subcommand_matches("update") {
-    let do_install = update_matches.get_flag("install");
-    return cli::check_for_update(do_install);
+  #[cfg(feature = "self-update")]
+  {
+    // Handle self-update command (doesn't need Spotify auth)
+    if let Some(update_matches) = matches.subcommand_matches("update") {
+      let do_install = update_matches.get_flag("install");
+      return cli::check_for_update(do_install);
+    }
   }
 
   // Auto-update on launch: silently check, download, install, and restart.
@@ -505,58 +512,62 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
   user_config.load_config()?;
   info!("user config loaded successfully");
 
-  if matches.subcommand_name().is_none()
-    && std::env::var_os("SPOTATUI_SKIP_UPDATE").is_none()
-    && !matches.get_flag("no-update")
-    && !user_config.behavior.disable_auto_update
+  #[cfg(feature = "self-update")]
   {
-    println!("Checking for updates...");
-    // Must use spawn_blocking because self_update uses reqwest::blocking internally,
-    // which creates its own tokio runtime and panics if called from an async context.
-    let delay_secs = cli::parse_delay_secs(&user_config.behavior.auto_update_delay).unwrap_or(0);
-    let update_result = tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
-      .await
-      .ok()
-      .and_then(|r| r.ok());
-    match update_result {
-      Some(cli::UpdateOutcome::Installed(new_version)) => {
-        println!("Updated to v{}! Restarting...", new_version);
-        // Re-exec the current binary with the same args, skipping the update check
-        let exe = std::env::current_exe().expect("failed to get current executable path");
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let status = std::process::Command::new(&exe)
-          .args(&args)
-          .env("SPOTATUI_SKIP_UPDATE", "1")
-          .status();
-        match status {
-          Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
-          Err(e) => {
-            eprintln!("Failed to restart after update: {}", e);
-            eprintln!("Please restart spotatui manually.");
-            std::process::exit(1);
+    if matches.subcommand_name().is_none()
+      && std::env::var_os("SPOTATUI_SKIP_UPDATE").is_none()
+      && !matches.get_flag("no-update")
+      && !user_config.behavior.disable_auto_update
+    {
+      println!("Checking for updates...");
+      // Must use spawn_blocking because self_update uses reqwest::blocking internally,
+      // which creates its own tokio runtime and panics if called from an async context.
+      let delay_secs = cli::parse_delay_secs(&user_config.behavior.auto_update_delay).unwrap_or(0);
+      let update_result =
+        tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
+          .await
+          .ok()
+          .and_then(|r| r.ok());
+      match update_result {
+        Some(cli::UpdateOutcome::Installed(new_version)) => {
+          println!("Updated to v{}! Restarting...", new_version);
+          // Re-exec the current binary with the same args, skipping the update check
+          let exe = std::env::current_exe().expect("failed to get current executable path");
+          let args: Vec<String> = std::env::args().skip(1).collect();
+          let status = std::process::Command::new(&exe)
+            .args(&args)
+            .env("SPOTATUI_SKIP_UPDATE", "1")
+            .status();
+          match status {
+            Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
+            Err(e) => {
+              eprintln!("Failed to restart after update: {}", e);
+              eprintln!("Please restart spotatui manually.");
+              std::process::exit(1);
+            }
           }
         }
+        Some(cli::UpdateOutcome::Pending {
+          version,
+          secs_remaining,
+        }) => {
+          let human = if secs_remaining >= 86400 {
+            format!("{}d", secs_remaining / 86400)
+          } else if secs_remaining >= 3600 {
+            format!("{}h", secs_remaining / 3600)
+          } else if secs_remaining >= 60 {
+            format!("{}m", secs_remaining / 60)
+          } else {
+            format!("{}s", secs_remaining)
+          };
+          println!(
+            "Update v{} detected — will install in {}. Run `spotatui update --install` to update now.",
+            version, human
+          );
+        }
+        // Up-to-date, check failed, or no update — continue normally
+        _ => {}
       }
-      Some(cli::UpdateOutcome::Pending {
-        version,
-        secs_remaining,
-      }) => {
-        let human = if secs_remaining >= 86400 {
-          format!("{}d", secs_remaining / 86400)
-        } else if secs_remaining >= 3600 {
-          format!("{}h", secs_remaining / 3600)
-        } else if secs_remaining >= 60 {
-          format!("{}m", secs_remaining / 60)
-        } else {
-          format!("{}s", secs_remaining)
-        };
-        println!(
-          "Update v{} detected — will install in {}. Run `spotatui update --install` to update now.",
-          version, human
-        );
-      }
-      // Up-to-date, check failed, or no update — continue normally
-      _ => {}
     }
   }
 

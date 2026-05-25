@@ -3015,12 +3015,14 @@ impl App {
           description: "Show one-time announcements from remote JSON feed".to_string(),
           value: SettingValue::Bool(self.user_config.behavior.enable_announcements),
         },
+        #[cfg(feature = "self-update")]
         SettingItem {
           id: "behavior.disable_auto_update".to_string(),
           name: "Disable Auto-Update".to_string(),
           description: "Skip the automatic update check on startup. Use the 'spotatui update' command to update manually.".to_string(),
           value: SettingValue::Bool(self.user_config.behavior.disable_auto_update),
         },
+        #[cfg(feature = "self-update")]
         SettingItem {
           id: "behavior.auto_update_delay".to_string(),
           name: "Auto-Update Delay".to_string(),
@@ -3458,11 +3460,13 @@ impl App {
             self.user_config.behavior.enable_announcements = *v;
           }
         }
+        #[cfg(feature = "self-update")]
         "behavior.disable_auto_update" => {
           if let SettingValue::Bool(v) = &setting.value {
             self.user_config.behavior.disable_auto_update = *v;
           }
         }
+        #[cfg(feature = "self-update")]
         "behavior.auto_update_delay" => {
           if let SettingValue::String(v) = &setting.value {
             self.user_config.behavior.auto_update_delay = v.clone();

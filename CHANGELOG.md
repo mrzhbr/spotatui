@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Optional self-update feature**: Added a default-on `self-update` Cargo feature so package builds can omit update checks and installer code with `--no-default-features --features telemetry` ([#270](https://github.com/LargeModGames/spotatui/issues/270)).
+
 ### Fixed
 
 - **Native streaming device handoff**: Kept native streaming recovery from stealing playback back after the user transfers listening from spotatui to another Spotify Connect device ([#254](https://github.com/LargeModGames/spotatui/issues/254)).

@@ -184,6 +184,7 @@ fn handle_string_edit(key: Key, app: &mut App) {
       if let Some(setting) = app.settings_items.get_mut(app.settings_selected_index) {
         let new_value = app.settings_edit_buffer.clone();
 
+        #[cfg(feature = "self-update")]
         if setting.id == "behavior.auto_update_delay" {
           if let Err(e) = crate::cli::parse_delay_secs(&new_value) {
             app.handle_error(anyhow::anyhow!("Invalid delay format: {}", e));

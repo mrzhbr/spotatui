@@ -700,7 +700,9 @@ pub struct BehaviorConfigString {
   pub playbar_height_rows: Option<u16>,
   pub library_height_percent: Option<u8>,
   pub startup_behavior: Option<StartupBehavior>,
+  #[cfg(feature = "self-update")]
   pub disable_auto_update: Option<bool>,
+  #[cfg(feature = "self-update")]
   pub auto_update_delay: Option<String>,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art: Option<bool>,
@@ -744,7 +746,9 @@ pub struct BehaviorConfig {
   pub playbar_height_rows: u16,
   pub library_height_percent: u8,
   pub startup_behavior: StartupBehavior,
+  #[cfg(feature = "self-update")]
   pub disable_auto_update: bool,
+  #[cfg(feature = "self-update")]
   pub auto_update_delay: String,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art: bool,
@@ -775,6 +779,7 @@ pub struct UserConfig {
 impl UserConfig {
   /// Get the spotatui app config directory (~/.config/spotatui).
   /// Returns None if $HOME is not set.
+  #[cfg(feature = "self-update")]
   pub fn get_app_config_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
   }
@@ -863,7 +868,9 @@ impl UserConfig {
         playbar_height_rows: 6,
         library_height_percent: 30,
         startup_behavior: StartupBehavior::Continue,
+        #[cfg(feature = "self-update")]
         disable_auto_update: false,
+        #[cfg(feature = "self-update")]
         auto_update_delay: "0".to_string(),
         #[cfg(feature = "cover-art")]
         draw_cover_art: true,
@@ -1181,12 +1188,15 @@ impl UserConfig {
       self.behavior.startup_behavior = startup_behavior;
     }
 
-    if let Some(disable_auto_update) = behavior_config.disable_auto_update {
-      self.behavior.disable_auto_update = disable_auto_update;
-    }
+    #[cfg(feature = "self-update")]
+    {
+      if let Some(disable_auto_update) = behavior_config.disable_auto_update {
+        self.behavior.disable_auto_update = disable_auto_update;
+      }
 
-    if let Some(auto_update_delay) = behavior_config.auto_update_delay {
-      self.behavior.auto_update_delay = auto_update_delay;
+      if let Some(auto_update_delay) = behavior_config.auto_update_delay {
+        self.behavior.auto_update_delay = auto_update_delay;
+      }
     }
 
     #[cfg(feature = "cover-art")]
@@ -1283,7 +1293,9 @@ impl UserConfig {
       playbar_height_rows: Some(self.behavior.playbar_height_rows),
       library_height_percent: Some(self.behavior.library_height_percent),
       startup_behavior: Some(self.behavior.startup_behavior),
+      #[cfg(feature = "self-update")]
       disable_auto_update: Some(self.behavior.disable_auto_update),
+      #[cfg(feature = "self-update")]
       auto_update_delay: Some(self.behavior.auto_update_delay.clone()),
       #[cfg(feature = "cover-art")]
       draw_cover_art: Some(self.behavior.draw_cover_art),
