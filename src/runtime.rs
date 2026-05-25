@@ -554,6 +554,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     .subcommand(cli::playback_subcommand())
     .subcommand(cli::play_subcommand())
     .subcommand(cli::list_subcommand())
+    .subcommand(cli::history_subcommand())
     .subcommand(cli::search_subcommand()),
   );
 
@@ -575,6 +576,11 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
 
   // Handle self-update command (doesn't need Spotify auth)
   if handle_self_update_command(&matches)? {
+    return Ok(());
+  }
+
+  if let Some(history_matches) = matches.subcommand_matches("history") {
+    println!("{}", cli::handle_history_matches(history_matches)?);
     return Ok(());
   }
 
@@ -755,6 +761,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
   // Launch the UI (async)
   } else {
     info!("launching interactive terminal ui");
+    crate::infra::history::spawn_history_collector(Arc::clone(&app));
     #[cfg(feature = "streaming")]
     let (streaming_supported_for_account, streaming_startup_status_message) =
       if client_config.enable_streaming {

@@ -5,10 +5,16 @@
 ### Added
 
 - **Optional self-update feature**: Added a default-on `self-update` Cargo feature so package builds can omit update checks and installer code with `--no-default-features --features telemetry` ([#270](https://github.com/LargeModGames/spotatui/issues/270)).
+- **Listening history export & recap**: Added local listening history collection to `~/.config/spotatui/history/listens.jsonl` and a new CLI command `spotatui history recap --period 30d --output ./file.html` to generate a shareable HTML recap. Recaps exclude short/skipped plays and power future sync and analytics features.
+- **Generate Recap keybinding**: Added a configurable `R` keybinding to generate and open a 30-day listening recap HTML card directly from the app.
+- **Listening history sync token**: Added optional `behavior.sync_token` setting for syncing listening history with spotatui.com
+- **Native playback origin tracking**: Added `NativePlaybackOrigin` enum to distinguish between context-backed playback (safe for Spotify API handoff) and raw URI-list playback (stays on native route for stability).
+- **Track kind detection**: Extended native track info to capture whether a track is a regular `Track` or an `Episode`, enabling proper URI construction and future episode-specific UI handling.
 
 ### Fixed
 
 - **Native streaming device handoff**: Kept native streaming recovery from stealing playback back after the user transfers listening from spotatui to another Spotify Connect device ([#254](https://github.com/LargeModGames/spotatui/issues/254)).
+- **Context-backed native playback**: Native playback started from a Spotify context (e.g., album, playlist, queue) now prefers Spotify-visible playback starts when safe, while raw URI-list playback remains on the stable direct native path to avoid regression.
 
 ## [v0.38.3] - 2026-05-23
 

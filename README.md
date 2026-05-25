@@ -184,6 +184,9 @@ spotatui list --liked --limit 50 # See your liked songs (50 is the max limit)
 
 # Looks for 'An even cooler song' and gives you the '{name} from {album}' of up to 30 matches
 spotatui search "An even cooler song" --tracks --format "%t from %b" --limit 30
+
+# Generate a shareable HTML recap from spotatui's local listening history
+spotatui history recap --period 30d --output ./spotatui-recap.html
 ```
 
 ## Native Streaming
@@ -192,12 +195,15 @@ spotatui can play audio directly without needing spotifyd or the official Spotif
 
 - Works with media keys, MPRIS (Linux), and macOS Now Playing
 - Premium account required
+- Context-backed native playback prefers Spotify-visible playback starts when it is safe to do so, while raw URI-list playback stays on the stable direct native path
 
 See the [Native Streaming Wiki](https://github.com/LargeModGames/spotatui/wiki/Native-Streaming) for setup details.
 
 ## Configuration
 
 A configuration file is located at `${HOME}/.config/spotatui/config.yml`.
+
+spotatui also stores local listening history at `${HOME}/.config/spotatui/history/listens.jsonl`. This powers the `spotatui history recap` CLI and starts collecting from rollout onward; short or skipped plays are stored but excluded from recap totals.
 
 See the [Configuration Wiki](https://github.com/LargeModGames/spotatui/wiki/Configuration) for the full config file reference.
 
