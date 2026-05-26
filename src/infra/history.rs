@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 
 const HISTORY_SUBDIR: &str = "history";
 const LISTENS_FILE_NAME: &str = "listens.jsonl";
-const CLOUD_SYNC_URL: &str = "https://spotatui-web.spotatui.workers.dev/api/sync";
+const CLOUD_SYNC_URL: &str = "https://spotatui.com/api/sync";
 const MAX_INTERVAL_MS: u64 = 5_000;
 const REPLAY_RESET_THRESHOLD_MS: u128 = 15_000;
 const REPLAY_PREVIOUS_PROGRESS_FLOOR_MS: u128 = 30_000;
@@ -1567,5 +1567,10 @@ mod tests {
     let filtered = filter_listens_for_period(&records, RecapPeriod::All);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].title, "Track 21");
+  }
+
+  #[test]
+  fn cloud_sync_uses_public_spotatui_domain() {
+    assert_eq!(CLOUD_SYNC_URL, "https://spotatui.com/api/sync");
   }
 }

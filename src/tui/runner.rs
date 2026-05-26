@@ -700,12 +700,12 @@ pub async fn start_ui(
     app_guard.user_config.behavior.sync_token.clone()
   };
 
-    if let Some(token) = sync_token_opt {
-      info!("Synchronizing listening history to cloud before exit...");
-      if let Err(e) = crate::infra::history::sync_history_to_cloud(&token).await {
-        log::warn!("failed to run exit history cloud sync: {}", e);
-      }
+  if let Some(token) = sync_token_opt {
+    info!("Synchronizing listening history to cloud before exit...");
+    if let Err(e) = crate::infra::history::sync_history_to_cloud(&token).await {
+      log::warn!("failed to run exit history cloud sync: {}", e);
     }
+  }
 
   reset_window_title(&mut window_title_state)?;
   execute!(stdout(), DisableMouseCapture)?;
