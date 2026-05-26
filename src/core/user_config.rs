@@ -670,6 +670,7 @@ pub struct KeyBindingsString {
   save_settings: Option<String>,
   listening_party: Option<String>,
   like_track: Option<String>,
+  generate_recap: Option<String>,
 }
 
 #[derive(Clone)]
@@ -707,6 +708,7 @@ pub struct KeyBindings {
   pub save_settings: Key,
   pub listening_party: Key,
   pub like_track: Key,
+  pub generate_recap: Key,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -751,6 +753,7 @@ pub struct BehaviorConfigString {
   #[cfg(feature = "cover-art")]
   pub playbar_cover_art_size_percent: Option<u16>,
   pub keepawake_enabled: Option<bool>,
+  pub sync_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -795,6 +798,7 @@ pub struct BehaviorConfig {
   #[cfg(feature = "cover-art")]
   pub playbar_cover_art_size_percent: u16,
   pub keepawake_enabled: bool,
+  pub sync_token: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -873,6 +877,7 @@ impl UserConfig {
         save_settings: Key::Alt('s'),
         listening_party: Key::Ctrl('p'),
         like_track: Key::Char('F'),
+        generate_recap: Key::Char('R'),
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 5 * 1000,
@@ -915,6 +920,7 @@ impl UserConfig {
         #[cfg(feature = "cover-art")]
         playbar_cover_art_size_percent: 100,
         keepawake_enabled: true,
+        sync_token: None,
       },
       path_to_config: None,
     }
@@ -989,6 +995,7 @@ impl UserConfig {
     to_keys!(save_settings);
     to_keys!(listening_party);
     to_keys!(like_track);
+    to_keys!(generate_recap);
 
     Ok(())
   }
@@ -1204,6 +1211,15 @@ impl UserConfig {
       }
     }
 
+    if let Some(sync_token) = behavior_config.sync_token {
+      let trimmed = sync_token.trim();
+      if trimmed.is_empty() {
+        self.behavior.sync_token = None;
+      } else {
+        self.behavior.sync_token = Some(trimmed.to_string());
+      }
+    }
+
     if let Some(stop_after_current_track) = behavior_config.stop_after_current_track {
       self.behavior.stop_after_current_track = stop_after_current_track;
     }
@@ -1323,6 +1339,7 @@ impl UserConfig {
       visualizer_style: Some(self.behavior.visualizer_style),
       dismissed_announcements: Some(self.behavior.dismissed_announcements.clone()),
       relay_server_url: Some(self.behavior.relay_server_url.clone()),
+      sync_token: self.behavior.sync_token.clone(),
       stop_after_current_track: Some(self.behavior.stop_after_current_track),
       sidebar_width_percent: Some(self.behavior.sidebar_width_percent),
       playbar_height_rows: Some(self.behavior.playbar_height_rows),
@@ -1412,6 +1429,7 @@ impl UserConfig {
       save_settings: Some(key_to_config_string(self.keys.save_settings)),
       listening_party: Some(key_to_config_string(self.keys.listening_party)),
       like_track: Some(key_to_config_string(self.keys.like_track)),
+      generate_recap: Some(key_to_config_string(self.keys.generate_recap)),
     };
 
     // Helper to build theme config from current values

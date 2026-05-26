@@ -191,6 +191,43 @@ pub fn handle_app(key: Key, app: &mut App) {
         playbar::toggle_like_currently_playing_item(app);
       }
     }
+    _ if key == app.user_config.keys.generate_recap => {
+      if is_input_mode(app) {
+        handle_block_events(key, app);
+      } else {
+        match dirs::home_dir() {
+          Some(home) => {
+            let output_path = home
+              .join(".config")
+              .join("spotatui")
+              .join("spotatui-recap.html");
+            match crate::infra::history::export_history_recap(
+              crate::infra::history::RecapPeriod::ThirtyDays,
+              &output_path,
+            ) {
+              Ok(count) => {
+                app.set_status_message(
+                  format!(
+                    "Listening recap generated at ~/.config/spotatui/spotatui-recap.html ({} listens)",
+                    count
+                  ),
+                  5,
+                );
+                if let Err(e) = open::that(&output_path) {
+                  log::warn!("failed to open recap in browser: {}", e);
+                }
+              }
+              Err(e) => {
+                app.set_status_message(format!("Failed to generate recap: {}", e), 5);
+              }
+            }
+          }
+          None => {
+            app.set_status_message("Error: Could not locate home directory", 5);
+          }
+        }
+      }
+    }
     // Resize sidebar: { decreases, } increases width
     Key::Char('{') => {
       if is_input_mode(app) {

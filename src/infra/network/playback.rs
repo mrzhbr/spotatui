@@ -1,9 +1,13 @@
 use super::requests::spotify_get_typed_compat_for;
 use super::{IoEvent, Network};
+#[cfg(feature = "streaming")]
+use crate::core::app::NativePlaybackOrigin;
 use crate::tui::ui::util::create_artist_string;
 use anyhow::anyhow;
 use chrono::Duration as ChronoDuration;
 use chrono::TimeDelta;
+#[cfg(feature = "streaming")]
+use log::info;
 use rspotify::model::{
   enums::RepeatState,
   idtypes::{PlayContextId, PlayableId},
@@ -98,6 +102,13 @@ fn playable_item_name(item: &PlayableItem) -> Option<&str> {
   }
 }
 
+#[cfg(feature = "streaming")]
+#[derive(Debug, PartialEq, Eq)]
+enum NativePlaybackRoute {
+  ContextApi { device_id: String },
+  NativeLoad,
+}
+
 fn api_confirms_native_info_is_current(
   native_name: &str,
   item: &PlayableItem,
@@ -187,6 +198,53 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
 
   // No match - not the active device
   false
+}
+
+#[cfg(feature = "streaming")]
+async fn requested_native_playback_origin(
+  network: &Network,
+  context_id: &Option<PlayContextId<'static>>,
+  uris: &Option<Vec<PlayableId<'static>>>,
+) -> NativePlaybackOrigin {
+  if context_id.is_some() {
+    return NativePlaybackOrigin::Context;
+  }
+
+  if uris.is_some() {
+    return NativePlaybackOrigin::RawList;
+  }
+
+  let app = network.app.lock().await;
+  if let Some(origin) = app.native_playback_origin {
+    return origin;
+  }
+
+  if app
+    .current_playback_context
+    .as_ref()
+    .and_then(|ctx| ctx.context.as_ref())
+    .is_some()
+  {
+    NativePlaybackOrigin::Context
+  } else {
+    NativePlaybackOrigin::RawList
+  }
+}
+
+#[cfg(feature = "streaming")]
+async fn resolve_native_playback_route(
+  network: &Network,
+  context_id: &Option<PlayContextId<'static>>,
+) -> NativePlaybackRoute {
+  if context_id.is_none() {
+    return NativePlaybackRoute::NativeLoad;
+  }
+
+  let app = network.app.lock().await;
+  match app.native_device_id.clone() {
+    Some(device_id) => NativePlaybackRoute::ContextApi { device_id },
+    None => NativePlaybackRoute::NativeLoad,
+  }
 }
 
 impl PlaybackNetwork for Network {
@@ -527,6 +585,8 @@ impl PlaybackNetwork for Network {
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
+        let requested_origin = requested_native_playback_origin(self, &context_id, &uris).await;
+        let native_route = resolve_native_playback_route(self, &context_id).await;
         let activation_time = Instant::now();
         let should_transfer = {
           let app = self.app.lock().await;
@@ -551,10 +611,12 @@ impl PlaybackNetwork for Network {
           app.is_streaming_active = true;
           app.last_device_activation = Some(activation_time);
           app.native_activation_pending = false;
+          app.native_playback_origin = Some(requested_origin);
         }
 
         // For resume playback (no context, no uris)
         if context_id.is_none() && uris.is_none() {
+          info!("starting native resume playback via direct player route");
           player.play();
           // Update UI state immediately
           let mut app = self.app.lock().await;
@@ -562,6 +624,49 @@ impl PlaybackNetwork for Network {
             ctx.is_playing = true;
           }
           return;
+        }
+
+        if let (NativePlaybackRoute::ContextApi { device_id }, Some(context)) =
+          (&native_route, context_id.clone())
+        {
+          info!(
+            "starting native playback via Spotify context route on device {}",
+            device_id
+          );
+          let offset_struct = api_playback_offset(uris.as_deref(), offset);
+          match self
+            .spotify
+            .start_context_playback(context, Some(device_id.as_str()), offset_struct, None)
+            .await
+          {
+            Ok(_) => {
+              if let Err(e) = self
+                .spotify
+                .shuffle(desired_shuffle_state, Some(device_id.as_str()))
+                .await
+              {
+                let mut app = self.app.lock().await;
+                app.handle_error(anyhow!(e));
+              }
+
+              let mut app = self.app.lock().await;
+              app.instant_since_last_current_playback_poll =
+                Instant::now() - Duration::from_secs(6);
+              if let Some(ctx) = &mut app.current_playback_context {
+                ctx.is_playing = true;
+                ctx.shuffle_state = desired_shuffle_state;
+              }
+              app.user_config.behavior.shuffle_enabled = desired_shuffle_state;
+              app.dispatch(IoEvent::GetCurrentPlayback);
+              return;
+            }
+            Err(e) => {
+              info!(
+                "native context playback via Spotify API failed; falling back to direct native load: {}",
+                e
+              );
+            }
+          }
         }
 
         // For URI-based or context playback, use Spirc load directly.
@@ -604,6 +709,7 @@ impl PlaybackNetwork for Network {
           }
         };
 
+        info!("starting native playback via direct load route");
         if let Err(e) = player.load(request) {
           let mut app = self.app.lock().await;
           app.handle_error(anyhow!("Failed to start native playback: {}", e));
@@ -900,6 +1006,7 @@ impl PlaybackNetwork for Network {
           let mut app = self.app.lock().await;
           app.is_streaming_active = true;
           app.native_activation_pending = true;
+          app.native_playback_origin = None;
           app.last_device_activation = Some(Instant::now());
           app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_secs(6);
           return;
@@ -924,6 +1031,7 @@ impl PlaybackNetwork for Network {
       {
         // If transferring away from native, update flag
         app.is_streaming_active = false;
+        app.native_playback_origin = None;
       }
     }
   }

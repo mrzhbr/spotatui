@@ -345,6 +345,11 @@ pub fn get_help_docs(app: &App) -> Vec<Vec<String>> {
       String::from("General"),
     ],
     vec![
+      String::from("Generate 30-day listening recap card"),
+      key_bindings.generate_recap.to_string(),
+      String::from("General"),
+    ],
+    vec![
       String::from("Open sort menu"),
       String::from(","),
       String::from("Track/Album/Artist list"),

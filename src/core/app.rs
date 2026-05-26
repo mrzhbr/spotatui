@@ -459,6 +459,21 @@ pub enum LyricsStatus {
   NotFound,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativePlaybackOrigin {
+  Context,
+  #[default]
+  RawList,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeTrackKind {
+  #[default]
+  Track,
+  Episode,
+}
+
 /// Immediate track info from native player for instant UI updates
 /// Used to display track info immediately when skipping, before API responds
 #[derive(Clone, Debug, Default)]
@@ -468,6 +483,7 @@ pub struct NativeTrackInfo {
   #[allow(dead_code)]
   pub album: String, // Reserved for future use (e.g., displaying album in playbar)
   pub duration_ms: u32,
+  pub kind: NativeTrackKind,
 }
 
 /// A node in the playlist folder hierarchy from Spotify's rootlist
@@ -735,6 +751,9 @@ pub struct App {
   /// Native playback state - updated by player events, used when streaming is active
   /// This is more reliable than current_playback_context.is_playing during native streaming
   pub native_is_playing: Option<bool>,
+  /// Tracks whether the current native playback was started from a Spotify context
+  /// or from a raw URI-list/native-only route.
+  pub native_playback_origin: Option<NativePlaybackOrigin>,
   /// Prevent idle/sleep during playback
   pub keepawake: Option<keepawake::KeepAwake>,
   /// Timestamp of the last native device activation
@@ -963,6 +982,7 @@ impl Default for App {
       is_streaming_active: false,
       native_device_id: None,
       native_is_playing: None,
+      native_playback_origin: None,
       keepawake: None,
       last_device_activation: None,
       native_activation_pending: false,
@@ -3043,6 +3063,19 @@ impl App {
           ),
         },
         SettingItem {
+          id: "behavior.sync_token".to_string(),
+          name: "Sync Token".to_string(),
+          description: "API token from spotatui.com to sync listening history".to_string(),
+          value: SettingValue::String(
+            self
+              .user_config
+              .behavior
+              .sync_token
+              .clone()
+              .unwrap_or_default(),
+          ),
+        },
+        SettingItem {
           id: "behavior.liked_icon".to_string(),
           name: "Liked Icon".to_string(),
           description: "Icon for liked songs".to_string(),
@@ -3235,6 +3268,12 @@ impl App {
           description: "Toggle saved state for the currently playing track or episode"
             .to_string(),
           value: SettingValue::Key(key_to_string(&self.user_config.keys.like_track)),
+        },
+        SettingItem {
+          id: "keys.generate_recap".to_string(),
+          name: "Generate Listening Recap".to_string(),
+          description: "Generate and open the 30-day listening recap HTML card".to_string(),
+          value: SettingValue::Key(key_to_string(&self.user_config.keys.generate_recap)),
         },
         SettingItem {
           id: "keys.copy_song_url".to_string(),
@@ -3482,6 +3521,16 @@ impl App {
             };
           }
         }
+        "behavior.sync_token" => {
+          if let SettingValue::String(v) = &setting.value {
+            let trimmed = v.trim();
+            self.user_config.behavior.sync_token = if trimmed.is_empty() {
+              None
+            } else {
+              Some(trimmed.to_string())
+            };
+          }
+        }
         "behavior.liked_icon" => {
           if let SettingValue::String(v) = &setting.value {
             self.user_config.behavior.liked_icon = v.clone();
@@ -3687,6 +3736,13 @@ impl App {
           if let SettingValue::Key(v) = &setting.value {
             if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
               self.user_config.keys.like_track = key;
+            }
+          }
+        }
+        "keys.generate_recap" => {
+          if let SettingValue::Key(v) = &setting.value {
+            if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
+              self.user_config.keys.generate_recap = key;
             }
           }
         }

@@ -235,6 +235,7 @@ mod tests {
       artists_display: "The Artist".to_string(),
       album: "The Album".to_string(),
       duration_ms: 180_000,
+      kind: crate::core::app::NativeTrackKind::Track,
     });
 
     assert_eq!(playback_window_title(&app), "The Track — The Artist");
@@ -249,6 +250,7 @@ mod tests {
       artists_display: "The\nArtist".to_string(),
       album: "The Album".to_string(),
       duration_ms: 180_000,
+      kind: crate::core::app::NativeTrackKind::Track,
     });
 
     assert_eq!(playback_window_title(&app), "The]2;Bad Track — TheArtist");
@@ -691,6 +693,19 @@ pub async fn start_ui(
 
   #[cfg(feature = "streaming")]
   pause_native_playback_before_exit(app).await;
+
+  // Sync history to cloud on exit
+  let sync_token_opt = {
+    let app_guard = app.lock().await;
+    app_guard.user_config.behavior.sync_token.clone()
+  };
+
+  if let Some(token) = sync_token_opt {
+    info!("Synchronizing listening history to cloud before exit...");
+    if let Err(e) = crate::infra::history::sync_history_to_cloud(&token).await {
+      log::warn!("failed to run exit history cloud sync: {}", e);
+    }
+  }
 
   reset_window_title(&mut window_title_state)?;
   execute!(stdout(), DisableMouseCapture)?;
