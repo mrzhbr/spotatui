@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Friends screen**: Added a new Library entry and full Friends screen backed by spotatui.com, including friend-code display, online filtering, inline name search, and live now-playing status for followed users.
+- **Friend management flows**: Added add-friend support by friend code or username search, plus unfollow actions and periodic background refresh while the Friends screen is open.
+- **Wayland clipboard support**: Enabled Linux `arboard` Wayland data-control support so clipboard operations like copying the friend code work reliably on Wayland sessions.
+
+### Fixed
+
+- **Friends key handling**: Friends-specific keys and inline input now take precedence over conflicting global shortcuts, so add/search/copy/filter actions stay local to the Friends UI.
 - **Playlist track search**: Added playlist-internal track search from playlist track tables with `<Ctrl+f>`, client-side matching across track title, artists, and album, loading feedback while large playlists are scanned, and `q`/the configured back key to clear the active playlist filter and restore the cached playlist view ([#198](https://github.com/LargeModGames/spotatui/issues/198)).
 
 ### Fixed

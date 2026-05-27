@@ -37,9 +37,10 @@ use std::{
 use arboard::Clipboard;
 use log::info;
 
-pub const LIBRARY_OPTIONS: [&str; 6] = [
+pub const LIBRARY_OPTIONS: [&str; 7] = [
   "Discover",
   "Recently Played",
+  "Friends",
   "Liked Songs",
   "Albums",
   "Artists",
@@ -244,6 +245,7 @@ pub enum ActiveBlock {
   Queue,
   Party,
   CreatePlaylistForm,
+  Friends,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -282,7 +284,55 @@ pub enum RouteId {
   Queue,
   Party,
   CreatePlaylist,
+  Friends,
 }
+
+// ── Friends feature ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct FriendEntry {
+  pub id: String,
+  pub name: String,
+  pub is_online: bool,
+  pub now_playing: Option<FriendNowPlaying>,
+  /// Total listening time in milliseconds (from spotatui.com)
+  #[allow(dead_code)]
+  pub listening_ms: u64,
+  /// Total number of listens tracked on spotatui.com
+  #[allow(dead_code)]
+  pub total_listens: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FriendNowPlaying {
+  pub title: String,
+  pub artists: String,
+}
+
+/// A user returned from the username/code search.
+#[derive(Clone, Debug)]
+pub struct FriendSearchResult {
+  pub id: String,
+  pub name: String,
+  pub is_following: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum FriendFilter {
+  #[default]
+  All,
+  Online,
+}
+
+/// Which tab is active in the "Add Friend" dialog.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum FriendAddMode {
+  #[default]
+  Code,
+  Search,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AnnouncementLevel {
@@ -889,6 +939,34 @@ pub struct App {
   #[cfg(all(feature = "mpris", target_os = "linux"))]
   pub mpris_manager: Option<Arc<crate::infra::mpris::MprisManager>>,
 
+  // Friends screen state
+  /// All friends fetched from spotatui.com (follows list)
+  pub friends: Vec<FriendEntry>,
+  /// Whether friends are currently loading from the API
+  pub friends_loading: bool,
+  /// Own friend code fetched from spotatui.com
+  pub friend_code: Option<String>,
+  /// Cursor position in the friends list
+  pub friend_selected_index: usize,
+  /// Active filter (All / Online)
+  pub friend_filter: FriendFilter,
+  /// Inline search / filter input on the Friends screen
+  pub friend_search_input: Vec<char>,
+  /// Whether the "Add Friend" overlay dialog is open
+  pub friend_add_dialog_visible: bool,
+  /// Which tab is active inside the add-friend dialog
+  pub friend_add_mode: FriendAddMode,
+  /// Input buffer for the "add by friend code" text field
+  pub friend_add_input: Vec<char>,
+  /// Input buffer for the "search by username" text field in the add dialog
+  pub friend_user_search_input: Vec<char>,
+  /// Results from searching users by name
+  pub friend_user_search_results: Vec<FriendSearchResult>,
+  /// Selected row in the user-search results list
+  pub friend_user_search_selected: usize,
+  /// Timestamp of the last time friends were refreshed (for periodic polling)
+  pub last_friends_refresh_at: Instant,
+
   // Create Playlist form state
   pub create_playlist_name: Vec<char>,
   pub create_playlist_name_idx: usize,
@@ -1077,6 +1155,19 @@ impl Default for App {
       mpris_manager: None,
       #[cfg(feature = "cover-art")]
       cover_art: crate::tui::cover_art::CoverArt::new(),
+      friends: Vec::new(),
+      friends_loading: false,
+      friend_code: None,
+      friend_selected_index: 0,
+      friend_filter: FriendFilter::All,
+      friend_search_input: Vec::new(),
+      friend_add_dialog_visible: false,
+      friend_add_mode: FriendAddMode::Code,
+      friend_add_input: Vec::new(),
+      friend_user_search_input: Vec::new(),
+      friend_user_search_results: Vec::new(),
+      friend_user_search_selected: 0,
+      last_friends_refresh_at: Instant::now(),
       create_playlist_name: Vec::new(),
       create_playlist_name_idx: 0,
       create_playlist_name_cursor: 0,
@@ -1173,6 +1264,20 @@ impl App {
     self.pending_playlist_track_add = None;
     self.pending_playlist_track_removal = None;
     self.playlist_picker_selected_index = 0;
+  }
+
+  pub fn clear_friend_add_dialog_state(&mut self) {
+    self.friend_add_dialog_visible = false;
+    self.friend_add_mode = FriendAddMode::Code;
+    self.friend_add_input.clear();
+    self.friend_user_search_input.clear();
+    self.friend_user_search_results.clear();
+    self.friend_user_search_selected = 0;
+  }
+
+  pub fn open_friend_add_dialog(&mut self) {
+    self.clear_friend_add_dialog_state();
+    self.friend_add_dialog_visible = true;
   }
 
   pub fn clear_dialog_state(&mut self) {
@@ -1457,6 +1562,16 @@ impl App {
     {
       self.last_party_sync_at = Instant::now();
       self.dispatch(IoEvent::SyncPlayback);
+    }
+
+    // Periodic friends refresh: re-fetch when the Friends screen is active, every 30 seconds.
+    if self.get_current_route().id == RouteId::Friends
+      && self.last_friends_refresh_at.elapsed() >= Duration::from_secs(30)
+      && !self.friends_loading
+      && self.user_config.behavior.sync_token.is_some()
+    {
+      self.last_friends_refresh_at = Instant::now();
+      self.dispatch(IoEvent::GetFriends);
     }
 
     if let Some(expires_at) = self.status_message_expires_at {

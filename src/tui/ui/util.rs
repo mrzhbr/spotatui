@@ -116,6 +116,16 @@ pub fn display_track_progress(progress: u128, track_duration: Duration) -> Strin
   format!("{}/{} (-{})", progress_display, duration, remaining,)
 }
 
+pub fn truncate_text(s: &str, max_chars: usize) -> String {
+  if s.chars().count() <= max_chars {
+    s.to_string()
+  } else {
+    let mut truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+  }
+}
+
 // `percentage` param needs to be between 0 and 1
 pub fn get_percentage_width(width: u16, percentage: f32) -> u16 {
   let padding = 3;

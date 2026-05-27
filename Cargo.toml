@@ -31,7 +31,6 @@ clap = { version = "4.6", features = ["cargo"] }
 clap_complete = "4.6"
 unicode-width = "0.2.2"
 backtrace = "0.3.76"
-arboard = "3.4"
 crossterm = "0.29"
 tui-equalizer = "0.2.0-alpha"
 tui-bar-graph = "0.3.3"
@@ -70,13 +69,16 @@ url = "2.5"
 keepawake = "0.6"
 
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+arboard = { version = "3.4", features = ["wayland-data-control"] }
 pipewire = { version = "0.10", optional = true }
 librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["alsa-backend"] }
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+arboard = { version = "3.4", features = ["wayland-data-control"] }
 librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["rodio-backend"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+arboard = "3.4"
 # On Windows we default to rodio for audio output.
 # Without this, librespot-playback falls back to the `pipe` sink which writes raw audio bytes
 # to stdout (breaking the TUI and producing no audible output).
@@ -91,6 +93,7 @@ mpris-server = { version = "0.10", optional = true }
 # Rodio has compatibility issues with macOS CoreAudio and Bluetooth devices (AirPods, etc.)
 # causing SIGSEGV crashes. See Issue #9 and #20.
 [target.'cfg(target_os = "macos")'.dependencies]
+arboard = "3.4"
 librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["portaudio-backend"] }
 objc2-media-player = { version = "0.3", optional = true }
 objc2-foundation = { version = "0.3", optional = true }

@@ -2,6 +2,7 @@ pub mod artist;
 pub mod audio_analysis;
 pub mod create_playlist;
 pub mod discover;
+pub mod friends;
 pub mod help;
 pub mod home;
 pub mod library;
@@ -22,6 +23,7 @@ use ratatui::{
 pub use self::artist::draw_artist_albums;
 pub use self::create_playlist::draw_create_playlist_form;
 pub use self::discover::draw_discover;
+pub use self::friends::draw_friends;
 pub use self::home::draw_home;
 pub use self::library::draw_user_block;
 #[cfg(feature = "cover-art")]
@@ -119,6 +121,9 @@ pub fn draw_routes(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     }
     RouteId::Discover => {
       draw_discover(f, app, content_area);
+    }
+    RouteId::Friends => {
+      draw_friends(f, app, content_area);
     }
     RouteId::Artists => {
       draw_artist_table(f, app, content_area);

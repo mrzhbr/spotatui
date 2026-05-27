@@ -1,3 +1,4 @@
+pub mod friends;
 pub mod library;
 pub mod metadata;
 pub mod playback;
@@ -135,6 +136,18 @@ pub enum IoEvent {
   SearchTracksForPlaylist(String),
   /// Create a new playlist with the given name and track IDs
   CreateNewPlaylist(String, Vec<TrackId<'static>>),
+  /// Fetch the current user's own friend code from spotatui.com
+  GetFriendCode,
+  /// Fetch the current user's friends list from spotatui.com
+  GetFriends,
+  /// Add a friend by their 6-character friend code
+  AddFriendByCode(String),
+  /// Add a friend by their spotatui.com user ID
+  AddFriendByUserId(String),
+  /// Unfollow a friend by their spotatui.com user ID
+  UnfollowFriend(String),
+  /// Search spotatui.com users by display name or friend code
+  SearchFriendUsers(String),
 }
 
 pub struct Network {
@@ -417,6 +430,24 @@ impl Network {
       }
       IoEvent::CreateNewPlaylist(name, track_ids) => {
         self.create_new_playlist(name, track_ids).await;
+      }
+      IoEvent::GetFriendCode => {
+        friends::handle_get_friend_code(self).await;
+      }
+      IoEvent::GetFriends => {
+        friends::handle_get_friends(self).await;
+      }
+      IoEvent::AddFriendByCode(code) => {
+        friends::handle_add_friend_by_code(self, code).await;
+      }
+      IoEvent::AddFriendByUserId(user_id) => {
+        friends::handle_add_friend_by_user_id(self, user_id).await;
+      }
+      IoEvent::UnfollowFriend(user_id) => {
+        friends::handle_unfollow_friend(self, user_id).await;
+      }
+      IoEvent::SearchFriendUsers(query) => {
+        friends::handle_search_friend_users(self, query).await;
       }
     };
 

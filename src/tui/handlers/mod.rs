@@ -13,6 +13,7 @@ mod discover;
 mod empty;
 mod episode_table;
 mod error_screen;
+mod friends;
 mod help_menu;
 mod home;
 mod input;
@@ -63,6 +64,19 @@ fn open_settings(app: &mut App) {
   app.push_navigation_stack(RouteId::Settings, ActiveBlock::Settings);
 }
 
+fn should_route_friends_before_globals(key: Key, app: &App) -> bool {
+  if app.get_current_route().active_block != ActiveBlock::Friends {
+    return false;
+  }
+
+  app.friend_add_dialog_visible
+    || !app.friend_search_input.is_empty()
+    || matches!(
+      key,
+      Key::Char('a') | Key::Char('c') | Key::Char('u') | Key::Tab
+    )
+}
+
 pub fn handle_app(key: Key, app: &mut App) {
   if app.get_current_route().active_block == ActiveBlock::Settings
     && (app.settings_unsaved_prompt_visible || app.settings_edit_mode)
@@ -80,6 +94,13 @@ pub fn handle_app(key: Key, app: &mut App) {
   // When Create Playlist form is open, all keys go directly to the form handler
   // (so typed characters aren't stolen by global bindings like 'd', space, etc.)
   if app.get_current_route().active_block == ActiveBlock::CreatePlaylistForm {
+    handle_block_events(key, app);
+    return;
+  }
+
+  // Friends has a few local keys that conflict with globals, plus inline input modes
+  // that need first chance to consume typed characters.
+  if should_route_friends_before_globals(key, app) {
     handle_block_events(key, app);
     return;
   }
@@ -411,6 +432,9 @@ fn handle_block_events(key: Key, app: &mut App) {
     ActiveBlock::CreatePlaylistForm => {
       create_playlist::handler(key, app);
     }
+    ActiveBlock::Friends => {
+      friends::handler(key, app);
+    }
   }
 }
 
@@ -460,6 +484,9 @@ fn handle_escape(app: &mut App) {
     }
     ActiveBlock::CreatePlaylistForm => {
       create_playlist::handler(Key::Esc, app);
+    }
+    ActiveBlock::Friends => {
+      friends::handler(Key::Esc, app);
     }
     _ => {
       app.set_current_route_state(Some(ActiveBlock::Empty), None);
@@ -544,7 +571,16 @@ mod tests {
     idtypes::PlaylistId,
     CurrentlyPlayingType, Device, PlayableId, PlayableItem,
   };
-  use std::{sync::mpsc::channel, time::SystemTime};
+  use std::{
+    sync::mpsc::{channel, TryRecvError},
+    time::SystemTime,
+  };
+
+  fn friends_app() -> App {
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
+    app
+  }
 
   #[test]
   fn global_shift_w_adds_current_track_from_anywhere() {
@@ -632,6 +668,96 @@ mod tests {
 
     // In input mode, 'F' should be added to the input buffer
     assert_eq!(app.input, vec!['F']);
+  }
+
+  #[test]
+  fn friends_a_opens_add_dialog_before_global_album_jump() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let track = full_track("0000000000000000000001", "Track 1");
+    app.current_playback_context = Some(CurrentPlaybackContext {
+      device: Device {
+        id: Some("device-1".to_string()),
+        is_active: true,
+        is_private_session: false,
+        is_restricted: false,
+        name: "Desk Speaker".to_string(),
+        _type: DeviceType::Computer,
+        volume_percent: Some(42),
+      },
+      repeat_state: RepeatState::Off,
+      shuffle_state: false,
+      context: None,
+      timestamp: Utc::now(),
+      progress: None,
+      is_playing: false,
+      item: Some(PlayableItem::Track(track)),
+      currently_playing_type: CurrentlyPlayingType::Track,
+      actions: Actions::default(),
+    });
+    app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
+
+    handle_app(Key::Char('a'), &mut app);
+
+    assert!(app.friend_add_dialog_visible);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Friends);
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+  }
+
+  #[test]
+  fn friends_c_prefers_friend_code_copy_over_global_song_copy() {
+    let mut app = friends_app();
+    app.friend_code = Some("jay-1234".to_string());
+    app.clipboard = None;
+
+    handle_app(Key::Char('c'), &mut app);
+
+    assert_eq!(
+      app.status_message.as_deref(),
+      Some("Clipboard not available")
+    );
+    assert!(!app.friend_add_dialog_visible);
+  }
+
+  #[test]
+  fn friends_search_buffer_keeps_globally_bound_characters_local() {
+    let mut app = friends_app();
+    app.friend_search_input = vec!['j'];
+
+    handle_app(Key::Char('a'), &mut app);
+    handle_app(Key::Char('c'), &mut app);
+
+    assert_eq!(app.friend_search_input, vec!['j', 'a', 'c']);
+    assert!(!app.friend_add_dialog_visible);
+    assert!(app.status_message.is_none());
+  }
+
+  #[test]
+  fn friends_without_local_state_still_allows_non_conflicting_globals() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
+
+    handle_app(app.user_config.keys.next_track, &mut app);
+
+    match rx.recv().unwrap() {
+      IoEvent::NextTrack => {}
+      _ => panic!("unexpected event"),
+    }
+    assert!(app.friend_search_input.is_empty());
+    assert!(!app.friend_add_dialog_visible);
+  }
+
+  #[test]
+  fn friends_add_dialog_keeps_priority_for_conflicting_keys() {
+    let mut app = friends_app();
+    app.open_friend_add_dialog();
+
+    handle_app(Key::Char('c'), &mut app);
+
+    assert!(app.friend_add_dialog_visible);
+    assert_eq!(app.friend_add_input, vec!['c']);
+    assert!(app.status_message.is_none());
   }
 
   #[test]
