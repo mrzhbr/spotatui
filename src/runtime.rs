@@ -60,7 +60,7 @@ use std::{
   fs,
   io::{self, Write},
   panic,
-  path::PathBuf,
+  path::{Path, PathBuf},
   sync::{atomic::AtomicU64, Arc},
 };
 use tokio::sync::Mutex;
@@ -133,7 +133,7 @@ fn subscription_level_label(level: rspotify::model::SubscriptionLevel) -> &'stat
 #[cfg(feature = "streaming")]
 async fn account_supports_native_streaming(
   spotify: &AuthCodePkceSpotify,
-  token_cache_path: &PathBuf,
+  token_cache_path: &Path,
   app: &Arc<Mutex<App>>,
 ) -> (bool, Option<&'static str>) {
   match spotify_get_typed_compat_for_with_refresh::<PrivateUser>(

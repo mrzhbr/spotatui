@@ -662,16 +662,27 @@ impl PlaybackNetwork for Network {
             "starting native playback via Spotify context route on device {}",
             device_id
           );
-          let offset_struct = api_playback_offset(uris.as_deref(), offset);
+          let body = api_playback_body(Some(&context), uris.as_deref(), offset);
           match self
-            .spotify
-            .start_context_playback(context, Some(device_id.as_str()), offset_struct, None)
+            .spotify_api_request_json(
+              Method::PUT,
+              "me/player/play",
+              &[("device_id", device_id.clone())],
+              body,
+            )
             .await
           {
             Ok(_) => {
               if let Err(e) = self
-                .spotify
-                .shuffle(desired_shuffle_state, Some(device_id.as_str()))
+                .spotify_api_request_json(
+                  Method::PUT,
+                  "me/player/shuffle",
+                  &[
+                    ("state", desired_shuffle_state.to_string()),
+                    ("device_id", device_id.clone()),
+                  ],
+                  None,
+                )
                 .await
               {
                 let mut app = self.app.lock().await;
