@@ -1,4 +1,4 @@
-use crate::core::app::{self, App};
+use crate::core::app::{self, App, NativeTrackKind};
 use crate::core::config::ClientConfig;
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 use crate::infra::macos_media;
@@ -281,19 +281,23 @@ async fn handle_player_events(
       PlayerEvent::TrackChanged { audio_item } => {
         use librespot_metadata::audio::UniqueFields;
 
-        let (artists, album) = match &audio_item.unique_fields {
+        let (artists, album, kind) = match &audio_item.unique_fields {
           UniqueFields::Track { artists, album, .. } => {
             let artist_names: Vec<String> = artists.0.iter().map(|a| a.name.clone()).collect();
-            (artist_names, album.clone())
+            (artist_names, album.clone(), NativeTrackKind::Track)
           }
-          UniqueFields::Episode { show_name, .. } => (vec![show_name.clone()], String::new()),
+          UniqueFields::Episode { show_name, .. } => (
+            vec![show_name.clone()],
+            String::new(),
+            NativeTrackKind::Episode,
+          ),
           UniqueFields::Local { artists, album, .. } => {
             let artist_vec = artists
               .as_ref()
               .map(|a| vec![a.clone()])
               .unwrap_or_default();
             let album_str = album.clone().unwrap_or_default();
-            (artist_vec, album_str)
+            (artist_vec, album_str, NativeTrackKind::Track)
           }
         };
 
@@ -325,6 +329,7 @@ async fn handle_player_events(
           artists_display: artists.join(", "),
           album: album.clone(),
           duration_ms: audio_item.duration_ms,
+          kind,
         });
 
         app.song_progress_ms = 0;
@@ -449,6 +454,7 @@ async fn handle_player_events(
           &shared_position,
           &shared_is_playing,
           "Native streaming disconnected; attempting recovery.",
+          false,
         )
         .await
         {
@@ -466,6 +472,7 @@ async fn handle_player_events(
     &shared_position,
     &shared_is_playing,
     "Native streaming stopped; attempting recovery.",
+    true,
   )
   .await
   {
@@ -501,6 +508,7 @@ async fn disconnect_streaming_player(
   shared_position: &Arc<AtomicU64>,
   shared_is_playing: &Arc<AtomicBool>,
   status_message: &str,
+  allow_reselect_device: bool,
 ) -> Option<StreamingRecoveryRequest> {
   let mut app_lock = app.lock().await;
   let current_player = app_lock.streaming_player.as_ref()?;
@@ -508,7 +516,10 @@ async fn disconnect_streaming_player(
     return None;
   }
 
-  let reselect_device = current_playback_matches_native(&app_lock, player);
+  // Spotify Connect sends SessionDisconnected when the user intentionally moves
+  // playback to another device. At that point the API context can still be the
+  // old native device, so only reselect native for non-Connect-disconnect paths.
+  let reselect_device = allow_reselect_device && current_playback_matches_native(&app_lock, player);
 
   app_lock.streaming_player = None;
   app_lock.is_streaming_active = false;
@@ -516,6 +527,7 @@ async fn disconnect_streaming_player(
   app_lock.native_device_id = None;
   app_lock.native_is_playing = Some(false);
   app_lock.native_track_info = None;
+  app_lock.native_playback_origin = None;
   app_lock.song_progress_ms = 0;
   app_lock.last_track_id = None;
   app_lock.last_device_activation = None;

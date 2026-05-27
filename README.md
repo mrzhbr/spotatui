@@ -6,11 +6,11 @@
 
 [![Crates.io](https://img.shields.io/crates/v/spotatui.svg)](https://crates.io/crates/spotatui)
 [![Upstream](https://img.shields.io/badge/upstream-Rigellute%2Fspotify--tui-blue)](https://github.com/Rigellute/spotify-tui)
+[![X](https://img.shields.io/badge/@LargeModGames-000000?logo=x&logoColor=white)](https://twitter.com/LargeModGames)
 [![Songs played using Spotatui](https://img.shields.io/badge/dynamic/json?url=https://spotatui-counter.spotatui.workers.dev&query=count&label=Songs%20played%20using%20spotatui&labelColor=0b0f14&color=1ed760&logo=spotify&logoColor=1ed760&style=flat-square&cacheSeconds=600)](https://github.com/LargeModGames/spotatui)
 [![spotatui Contributors](https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/LargeModGames/spotatui/main/.all-contributorsrc&query=%24.contributors.length&label=spotatui%20contributors&color=1ed760&style=flat-square)](#spotatui-contributors)
 [![Upstream Contributors](https://img.shields.io/badge/upstream_contributors-94-orange.svg?style=flat-square)](#upstream-contributors-spotify-tui)
 
-[![oosmetrics](https://api.oosmetrics.com/api/v1/badge/achievement/ccff995e-61d7-4ede-96ed-8e7fa0e48515.svg)](https://oosmetrics.com/repo/LargeModGames/spotatui)
 
 
 
@@ -184,6 +184,9 @@ spotatui list --liked --limit 50 # See your liked songs (50 is the max limit)
 
 # Looks for 'An even cooler song' and gives you the '{name} from {album}' of up to 30 matches
 spotatui search "An even cooler song" --tracks --format "%t from %b" --limit 30
+
+# Generate a shareable HTML recap from spotatui's local listening history
+spotatui history recap --period 30d --output ./spotatui-recap.html
 ```
 
 ## Native Streaming
@@ -192,12 +195,15 @@ spotatui can play audio directly without needing spotifyd or the official Spotif
 
 - Works with media keys, MPRIS (Linux), and macOS Now Playing
 - Premium account required
+- Context-backed native playback prefers Spotify-visible playback starts when it is safe to do so, while raw URI-list playback stays on the stable direct native path
 
 See the [Native Streaming Wiki](https://github.com/LargeModGames/spotatui/wiki/Native-Streaming) for setup details.
 
 ## Configuration
 
 A configuration file is located at `${HOME}/.config/spotatui/config.yml`.
+
+spotatui also stores local listening history at `${HOME}/.config/spotatui/history/listens.jsonl`. This powers the `spotatui history recap` CLI and starts collecting from rollout onward; short or skipped plays are stored but excluded from recap totals.
 
 See the [Configuration Wiki](https://github.com/LargeModGames/spotatui/wiki/Configuration) for the full config file reference.
 
@@ -308,7 +314,7 @@ sudo apt-get install -y -qq pkg-config libssl-dev libxcb1-dev libxcb-render0-dev
 
 ## Maintainer
 
-Maintained by **[LargeModGames](https://github.com/LargeModGames)**.
+Maintained by **[LargeModGames](https://github.com/LargeModGames)** ([@LargeModGames](https://twitter.com/LargeModGames) on Twitter).
 
 Originally forked from [spotify-tui](https://github.com/Rigellute/spotify-tui) by [Alexander Keliris](https://github.com/Rigellute).
 
@@ -328,7 +334,7 @@ Originally forked from [spotify-tui](https://github.com/Rigellute/spotify-tui) b
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/copeison"><img src="https://avatars.githubusercontent.com/u/184175589?v=4?s=100" width="100px;" alt="copeison"/><br /><sub><b>copeison</b></sub></a><br /><a href="#platform-copeison" title="Packaging/porting to new platform">📦</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/jacklorusso"><img src="https://avatars.githubusercontent.com/u/19835679?v=4?s=100" width="100px;" alt="jacklorusso"/><br /><sub><b>jacklorusso</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=jacklorusso" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/H41L33"><img src="https://avatars.githubusercontent.com/u/140116782?v=4?s=100" width="100px;" alt="H41L33"/><br /><sub><b>H41L33</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=H41L33" title="Documentation">📖</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://mzte.de"><img src="https://avatars.githubusercontent.com/u/28735087?v=4?s=100" width="100px;" alt="LordMZTE"/><br /><sub><b>LordMZTE</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=LordMZTE" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://mzte.de"><img src="https://avatars.githubusercontent.com/u/28735087?v=4?s=100" width="100px;" alt="LordMZTE"/><br /><sub><b>LordMZTE</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=LordMZTE" title="Code">💻</a> <a href="#platform-LordMZTE" title="Packaging/porting to new platform">📦</a></td>
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/bodoque-01"><img src="https://avatars.githubusercontent.com/u/63447579?v=4?s=100" width="100px;" alt="Sebastian Sarco"/><br /><sub><b>Sebastian Sarco</b></sub></a><br /><a href="https://github.com/LargeModGames/spotatui/commits?author=bodoque-01" title="Code">💻</a></td>

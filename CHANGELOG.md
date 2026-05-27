@@ -2,11 +2,45 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Playlist track search**: Added playlist-internal track search from playlist track tables with `<Ctrl+f>`, client-side matching across track title, artists, and album, loading feedback while large playlists are scanned, and `q`/the configured back key to clear the active playlist filter and restore the cached playlist view ([#198](https://github.com/LargeModGames/spotatui/issues/198)).
+
 ### Fixed
 
+- **Spotify auth retry path**: Centralized authenticated Spotify API requests behind a shared refresh-and-retry flow so expired access tokens are handled consistently across playback, library, search, recommendation, metadata, and user calls.
+
+## [v0.38.4] 2026-05-26
+
+### Added
+
+- **Optional self-update feature**: Added a default-on `self-update` Cargo feature so package builds can omit update checks and installer code with `--no-default-features --features telemetry` ([#270](https://github.com/LargeModGames/spotatui/issues/270)).
+- **Listening history export & recap**: Added local listening history collection to `~/.config/spotatui/history/listens.jsonl` and a new CLI command `spotatui history recap` to generate a shareable HTML recap. Recaps exclude short/skipped plays and power future sync and analytics features.
+- **Generate Recap keybinding**: Added a configurable `R` keybinding to generate and open a 30-day listening recap HTML card directly from the app.
+- **Listening history sync token**: Added optional `behavior.sync_token` setting for syncing listening history with spotatui.com
+  ([#275](https://github.com/LargeModGames/spotatui/pull/275)).
+- **Native playback origin tracking**: Added `NativePlaybackOrigin` enum to distinguish between context-backed playback (safe for Spotify API handoff) and raw URI-list playback (stays on native route for stability).
+- **Track kind detection**: Extended native track info to capture whether a track is a regular `Track` or an `Episode`, enabling proper URI construction and future episode-specific UI handling.
+
+### Fixed
+
+- **Native streaming device handoff**: Kept native streaming recovery from stealing playback back after the user transfers listening from spotatui to another Spotify Connect device ([#254](https://github.com/LargeModGames/spotatui/issues/254)).
+- **Context-backed native playback**: Native playback started from a Spotify context (e.g., album, playlist, queue) now prefers Spotify-visible playback starts when safe, while raw URI-list playback remains on the stable direct native path to avoid regression.
+
+## [v0.38.3] - 2026-05-23
+
+### Added
+
+- **Current track terminal title**: Updated the `Set Window Title` setting to show the currently playing track as `Track — Artist`, falling back to the default spotatui title when nothing is playing ([#262](https://github.com/LargeModGames/spotatui/issues/262)).
+
+### Fixed
+
+- **Adaptive tick rates**: Split normal UI refreshes from animation-heavy refreshes so regular screens default to a lower CPU cadence while audio visualization stays smooth, and migrate legacy saved tick-rate defaults automatically ([#252](https://github.com/LargeModGames/spotatui/issues/252)).
 - **Playbar cover art sizing**: Added configurable playbar cover art sizing and improved layout handling so the image, controls, and progress bar scale cleanly in the playbar ([#253](https://github.com/LargeModGames/spotatui/issues/253)).
 - **Mouse song selection**: Changed song-table left clicks so the first click highlights a row and a second click on the highlighted row selects/plays it, matching arrow-key plus Enter behavior ([#258](https://github.com/LargeModGames/spotatui/issues/258)).
+- **Playlist and Liked Songs infinite scroll**: Made playlist track tables and Liked Songs scroll continuously across cached pages, prefetch additional pages in the background, and wrap `Down` from the end back to the first row and `Up` from the first row back to the last loaded row.
 - **Startup playback hijacking**: Made the default `Continue` startup behavior passive so launching spotatui discovers devices without transferring playback to the native Spotatui Connect device ([#254](https://github.com/LargeModGames/spotatui/issues/254)).
+- **Native startup playbar metadata**: Kept native startup playback metadata authoritative while Spotify's playback API catches up, preventing the playbar from switching to an unrelated stale API track while the native player keeps playing the started song.
 
 ## [v0.38.2] - 2026-05-10
 

@@ -1,4 +1,6 @@
-use super::requests::{spotify_api_request_json_for, spotify_get_typed_compat_for};
+use super::requests::{
+  spotify_api_request_json_for_with_refresh, spotify_get_typed_compat_for_with_refresh,
+};
 use super::{IoEvent, Network};
 use crate::core::app::{
   ActiveBlock, App, PlaylistFolder, PlaylistFolderItem, PlaylistFolderNode, PlaylistFolderNodeType,
@@ -44,97 +46,189 @@ fn populate_liked_song_ids_from_saved_tracks(
   }
 }
 
+fn playlist_track_search_terms(query: &str) -> Vec<String> {
+  query
+    .split_whitespace()
+    .map(|term| term.to_lowercase())
+    .filter(|term| !term.is_empty())
+    .collect()
+}
+
+fn playlist_track_search_haystack(track: &rspotify::model::track::FullTrack) -> String {
+  let mut haystack = format!("{} {}", track.name, track.album.name);
+  for artist in &track.artists {
+    haystack.push(' ');
+    haystack.push_str(&artist.name);
+  }
+  haystack.to_lowercase()
+}
+
+fn playlist_track_matches_terms(
+  track: &rspotify::model::track::FullTrack,
+  terms: &[String],
+) -> bool {
+  let haystack = playlist_track_search_haystack(track);
+  terms.iter().all(|term| haystack.contains(term))
+}
+
 pub async fn prefetch_saved_tracks_page_task(
   spotify: AuthCodePkceSpotify,
   app: Arc<Mutex<App>>,
+  token_cache_path: std::path::PathBuf,
   limit: u32,
-  offset: u32,
+  mut offset: u32,
   generation: u64,
 ) {
-  let should_fetch = {
-    let app = app.lock().await;
-    app.saved_tracks_prefetch_generation == generation
-      && app
-        .library
-        .saved_tracks
-        .page_index_for_offset(offset)
-        .is_none()
-  };
+  loop {
+    let should_fetch = {
+      let mut app = app.lock().await;
+      app.saved_tracks_prefetch_generation == generation
+        && app
+          .library
+          .saved_tracks
+          .page_index_for_offset(offset)
+          .is_none()
+        && app.saved_tracks_prefetch_in_flight.insert(offset)
+    };
 
-  if !should_fetch {
-    return;
+    if !should_fetch {
+      return;
+    }
+
+    let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
+    let Ok(page) = spotify_get_typed_compat_for_with_refresh::<Page<rspotify::model::SavedTrack>>(
+      &spotify,
+      "me/tracks",
+      &query,
+      &token_cache_path,
+      &app,
+    )
+    .await
+    else {
+      let mut app_guard = app.lock().await;
+      app_guard.saved_tracks_prefetch_in_flight.remove(&offset);
+      return;
+    };
+
+    if page.items.is_empty() {
+      let mut app_guard = app.lock().await;
+      app_guard.saved_tracks_prefetch_in_flight.remove(&offset);
+      return;
+    }
+
+    let next_offset = page.next.as_ref().map(|_| page.offset + page.limit);
+    let mut app_guard = app.lock().await;
+    app_guard.saved_tracks_prefetch_in_flight.remove(&offset);
+    if app_guard.saved_tracks_prefetch_generation != generation {
+      return;
+    }
+
+    populate_liked_song_ids_from_saved_tracks(&mut app_guard.liked_song_ids_set, &page);
+    app_guard.library.saved_tracks.upsert_page_by_offset(page);
+    app_guard.set_saved_tracks_to_table_continuous();
+    let Some(candidate_next_offset) = next_offset else {
+      return;
+    };
+    let should_prefetch_next = app_guard
+      .library
+      .saved_tracks
+      .page_index_for_offset(candidate_next_offset)
+      .is_none()
+      && !app_guard
+        .saved_tracks_prefetch_in_flight
+        .contains(&candidate_next_offset);
+    drop(app_guard);
+
+    if should_prefetch_next {
+      offset = candidate_next_offset;
+    } else {
+      return;
+    }
   }
-
-  let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
-  let Ok(page) = spotify_get_typed_compat_for::<Page<rspotify::model::SavedTrack>>(
-    &spotify,
-    "me/tracks",
-    &query,
-  )
-  .await
-  else {
-    return;
-  };
-
-  if page.items.is_empty() {
-    return;
-  }
-
-  let mut app_guard = app.lock().await;
-  if app_guard.saved_tracks_prefetch_generation != generation {
-    return;
-  }
-
-  populate_liked_song_ids_from_saved_tracks(&mut app_guard.liked_song_ids_set, &page);
-  app_guard.library.saved_tracks.upsert_page_by_offset(page);
 }
 
 pub async fn prefetch_playlist_tracks_page_task(
   spotify: AuthCodePkceSpotify,
   app: Arc<Mutex<App>>,
+  token_cache_path: std::path::PathBuf,
   limit: u32,
   playlist_id: PlaylistId<'static>,
-  offset: u32,
+  mut offset: u32,
   generation: u64,
 ) {
-  let should_fetch = {
-    let app = app.lock().await;
-    app.playlist_tracks_prefetch_generation == generation
-      && app.is_playlist_track_table_active_for(&playlist_id)
-      && app
-        .playlist_track_pages
-        .page_index_for_offset(offset)
-        .is_none()
-  };
+  loop {
+    let should_fetch = {
+      let mut app = app.lock().await;
+      app.playlist_tracks_prefetch_generation == generation
+        && app.is_playlist_track_table_active_for(&playlist_id)
+        && app
+          .playlist_track_pages
+          .page_index_for_offset(offset)
+          .is_none()
+        && app.playlist_tracks_prefetch_in_flight.insert(offset)
+    };
 
-  if !should_fetch {
-    return;
+    if !should_fetch {
+      return;
+    }
+
+    let path = format!("playlists/{}/items", playlist_id.id());
+    let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
+    let Ok(page) = spotify_get_typed_compat_for_with_refresh::<Page<PlaylistItem>>(
+      &spotify,
+      &path,
+      &query,
+      &token_cache_path,
+      &app,
+    )
+    .await
+    else {
+      let mut app_guard = app.lock().await;
+      app_guard.playlist_tracks_prefetch_in_flight.remove(&offset);
+      return;
+    };
+
+    if page.items.is_empty() {
+      let mut app_guard = app.lock().await;
+      app_guard.playlist_tracks_prefetch_in_flight.remove(&offset);
+      return;
+    }
+
+    let next_offset = page.next.as_ref().map(|_| page.offset + page.limit);
+    let mut app_guard = app.lock().await;
+    app_guard.playlist_tracks_prefetch_in_flight.remove(&offset);
+    if app_guard.playlist_tracks_prefetch_generation != generation
+      || !app_guard.is_playlist_track_table_active_for(&playlist_id)
+    {
+      return;
+    }
+
+    app_guard.playlist_track_pages.upsert_page_by_offset(page);
+    app_guard.set_playlist_tracks_to_table_continuous();
+    let Some(candidate_next_offset) = next_offset else {
+      return;
+    };
+    let should_prefetch_next = app_guard
+      .playlist_track_pages
+      .page_index_for_offset(candidate_next_offset)
+      .is_none()
+      && !app_guard
+        .playlist_tracks_prefetch_in_flight
+        .contains(&candidate_next_offset);
+    drop(app_guard);
+
+    if should_prefetch_next {
+      offset = candidate_next_offset;
+    } else {
+      return;
+    }
   }
-
-  let path = format!("playlists/{}/items", playlist_id.id());
-  let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
-  let Ok(page) = spotify_get_typed_compat_for::<Page<PlaylistItem>>(&spotify, &path, &query).await
-  else {
-    return;
-  };
-
-  if page.items.is_empty() {
-    return;
-  }
-
-  let mut app_guard = app.lock().await;
-  if app_guard.playlist_tracks_prefetch_generation != generation
-    || !app_guard.is_playlist_track_table_active_for(&playlist_id)
-  {
-    return;
-  }
-
-  app_guard.playlist_track_pages.upsert_page_by_offset(page);
 }
 
 pub trait LibraryNetwork {
   async fn get_current_user_playlists(&mut self);
   async fn get_playlist_tracks(&mut self, playlist_id: PlaylistId<'static>, playlist_offset: u32);
+  async fn search_playlist_tracks(&mut self, playlist_id: PlaylistId<'static>, query: String);
   async fn get_current_user_saved_tracks(&mut self, offset: Option<u32>);
   async fn get_current_user_saved_albums(&mut self, offset: Option<u32>);
   async fn current_user_saved_albums_contains(&mut self, album_ids: Vec<AlbumId<'static>>);
@@ -181,10 +275,12 @@ impl Network {
 
     let mut all_results = Vec::with_capacity(uris.len());
     for batch in uri_batches(uris) {
-      let batch_results = spotify_get_typed_compat_for::<Vec<bool>>(
+      let batch_results = spotify_get_typed_compat_for_with_refresh::<Vec<bool>>(
         &self.spotify,
         "me/library/contains",
         &[("uris", batch.join(","))],
+        &self.token_cache_path,
+        &self.app,
       )
       .await?;
       all_results.extend(batch_results);
@@ -199,12 +295,14 @@ impl Network {
     }
 
     let query = vec![("uris", uris.join(","))];
-    spotify_api_request_json_for(
+    spotify_api_request_json_for_with_refresh(
       &self.spotify,
       Method::PUT,
       "me/library",
       &query,
       Some(json!({ "uris": uris })),
+      &self.token_cache_path,
+      &self.app,
     )
     .await?;
     Ok(())
@@ -216,12 +314,14 @@ impl Network {
     }
 
     let query = vec![("uris", uris.join(","))];
-    spotify_api_request_json_for(
+    spotify_api_request_json_for_with_refresh(
       &self.spotify,
       Method::DELETE,
       "me/library",
       &query,
       Some(json!({ "uris": uris })),
+      &self.token_cache_path,
+      &self.app,
     )
     .await?;
     Ok(())
@@ -230,9 +330,18 @@ impl Network {
   pub fn spawn_saved_tracks_prefetch(&self, offset: u32, generation: u64) {
     let spotify = self.spotify.clone();
     let app = self.app.clone();
+    let token_cache_path = self.token_cache_path.clone();
     let large_search_limit = self.large_search_limit;
     tokio::spawn(async move {
-      prefetch_saved_tracks_page_task(spotify, app, large_search_limit, offset, generation).await;
+      prefetch_saved_tracks_page_task(
+        spotify,
+        app,
+        token_cache_path,
+        large_search_limit,
+        offset,
+        generation,
+      )
+      .await;
     });
   }
 
@@ -244,11 +353,13 @@ impl Network {
   ) {
     let spotify = self.spotify.clone();
     let app = self.app.clone();
+    let token_cache_path = self.token_cache_path.clone();
     let large_search_limit = self.large_search_limit;
     tokio::spawn(async move {
       prefetch_playlist_tracks_page_task(
         spotify,
         app,
+        token_cache_path,
         large_search_limit,
         playlist_id,
         offset,
@@ -279,15 +390,20 @@ impl LibraryNetwork for Network {
       // Always use the compat path: parses raw JSON to serde_json::Value first,
       // which silently deduplicates keys (last-wins). This handles the known Spotify
       // API bug where "items" appears twice in the same JSON object.
-      let page = match super::requests::spotify_get_typed_compat_for::<Page<SimplifiedPlaylist>>(
+      let page = match spotify_get_typed_compat_for_with_refresh::<Page<SimplifiedPlaylist>>(
         &self.spotify,
         "me/playlists",
         &[("limit", limit.to_string()), ("offset", offset.to_string())],
+        &self.token_cache_path,
+        &self.app,
       )
       .await
       {
         Ok(page) => page,
         Err(e) => {
+          let mut app = self.app.lock().await;
+          app.pending_playlist_track_search = None;
+          drop(app);
           self.handle_error(anyhow!(e)).await;
           return;
         }
@@ -346,18 +462,23 @@ impl LibraryNetwork for Network {
     };
 
     let path = format!("playlists/{}/items", playlist_id.id());
-    match spotify_get_typed_compat_for::<Page<PlaylistItem>>(
+    match spotify_get_typed_compat_for_with_refresh::<Page<PlaylistItem>>(
       &self.spotify,
       &path,
       &[
         ("limit", self.large_search_limit.to_string()),
         ("offset", playlist_offset.to_string()),
       ],
+      &self.token_cache_path,
+      &self.app,
     )
     .await
     {
       Ok(playlist_tracks) => {
         let mut app = self.app.lock().await;
+        app
+          .playlist_tracks_prefetch_in_flight
+          .remove(&playlist_offset);
         if app.playlist_tracks_prefetch_generation != generation
           || !app.is_playlist_track_table_active_for(&playlist_id)
         {
@@ -367,7 +488,7 @@ impl LibraryNetwork for Network {
         let playlist_tracks_index = app
           .playlist_track_pages
           .upsert_page_by_offset(playlist_tracks);
-        app.show_playlist_tracks_page_at_index(playlist_tracks_index);
+        app.set_playlist_tracks_to_table_continuous();
 
         let next_offset = app.next_missing_playlist_tracks_offset(playlist_tracks_index);
         let generation = app.playlist_tracks_prefetch_generation;
@@ -379,12 +500,78 @@ impl LibraryNetwork for Network {
         }
       }
       Err(e) => {
+        let mut app = self.app.lock().await;
+        app
+          .playlist_tracks_prefetch_in_flight
+          .remove(&playlist_offset);
+        drop(app);
         self.handle_error(anyhow!(e)).await;
       }
     }
   }
 
+  async fn search_playlist_tracks(&mut self, playlist_id: PlaylistId<'static>, query: String) {
+    let terms = playlist_track_search_terms(&query);
+    if terms.is_empty() {
+      let mut app = self.app.lock().await;
+      app.clear_playlist_track_filter();
+      return;
+    }
+
+    let limit = self.large_search_limit;
+    let mut offset = 0u32;
+    let mut matches = Vec::new();
+
+    loop {
+      let path = format!("playlists/{}/items", playlist_id.id());
+      let page = match spotify_get_typed_compat_for_with_refresh::<Page<PlaylistItem>>(
+        &self.spotify,
+        &path,
+        &[("limit", limit.to_string()), ("offset", offset.to_string())],
+        &self.token_cache_path,
+        &self.app,
+      )
+      .await
+      {
+        Ok(page) => page,
+        Err(e) => {
+          self.handle_error(anyhow!(e)).await;
+          return;
+        }
+      };
+
+      if page.items.is_empty() {
+        break;
+      }
+
+      for (index, item) in page.items.iter().enumerate() {
+        if let Some(PlayableItem::Track(track)) = item.item.as_ref() {
+          if playlist_track_matches_terms(track, &terms) {
+            matches.push((track.clone(), page.offset as usize + index));
+          }
+        }
+      }
+
+      if page.next.is_none() {
+        break;
+      }
+      offset = page.offset.saturating_add(page.limit);
+    }
+
+    let match_count = matches.len();
+    let mut app = self.app.lock().await;
+    if app.apply_playlist_track_search_results(&playlist_id, query.clone(), matches) {
+      app.set_status_message(
+        format!("{match_count} playlist tracks match \"{query}\""),
+        3,
+      );
+    } else {
+      app.pending_playlist_track_search = None;
+    }
+  }
+
   async fn get_current_user_saved_tracks(&mut self, offset: Option<u32>) {
+    let requested_offset = offset.unwrap_or(0);
     let generation = {
       let app = self.app.lock().await;
       app.saved_tracks_prefetch_generation
@@ -395,22 +582,27 @@ impl LibraryNetwork for Network {
       query.push(("offset", offset.to_string()));
     }
 
-    match spotify_get_typed_compat_for::<Page<rspotify::model::SavedTrack>>(
+    match spotify_get_typed_compat_for_with_refresh::<Page<rspotify::model::SavedTrack>>(
       &self.spotify,
       "me/tracks",
       &query,
+      &self.token_cache_path,
+      &self.app,
     )
     .await
     {
       Ok(saved_tracks) => {
         let mut app = self.app.lock().await;
+        app
+          .saved_tracks_prefetch_in_flight
+          .remove(&requested_offset);
         if app.saved_tracks_prefetch_generation != generation {
           return;
         }
 
         populate_liked_song_ids_from_saved_tracks(&mut app.liked_song_ids_set, &saved_tracks);
         let saved_tracks_index = app.library.saved_tracks.upsert_page_by_offset(saved_tracks);
-        app.show_saved_tracks_page_at_index(saved_tracks_index);
+        app.set_saved_tracks_to_table_continuous();
 
         let next_offset = app.next_missing_saved_tracks_offset(saved_tracks_index);
         let generation = app.saved_tracks_prefetch_generation;
@@ -421,6 +613,11 @@ impl LibraryNetwork for Network {
         }
       }
       Err(e) => {
+        let mut app = self.app.lock().await;
+        app
+          .saved_tracks_prefetch_in_flight
+          .remove(&requested_offset);
+        drop(app);
         self.handle_error(anyhow!(e)).await;
       }
     }
@@ -432,10 +629,12 @@ impl LibraryNetwork for Network {
       query.push(("offset", offset.to_string()));
     }
 
-    match spotify_get_typed_compat_for::<Page<rspotify::model::SavedAlbum>>(
+    match spotify_get_typed_compat_for_with_refresh::<Page<rspotify::model::SavedAlbum>>(
       &self.spotify,
       "me/albums",
       &query,
+      &self.token_cache_path,
+      &self.app,
     )
     .await
     {
@@ -553,10 +752,12 @@ impl LibraryNetwork for Network {
       query.push(("offset", offset.to_string()));
     }
 
-    match spotify_get_typed_compat_for::<Page<rspotify::model::show::Show>>(
+    match spotify_get_typed_compat_for_with_refresh::<Page<rspotify::model::show::Show>>(
       &self.spotify,
       "me/shows",
       &query,
+      &self.token_cache_path,
+      &self.app,
     )
     .await
     {
@@ -657,12 +858,14 @@ impl LibraryNetwork for Network {
         }]
     });
 
-    match spotify_api_request_json_for(
+    match spotify_api_request_json_for_with_refresh(
       &self.spotify,
       Method::DELETE,
       &format!("playlists/{}/tracks", playlist_id.id()),
       &[],
       Some(body),
+      &self.token_cache_path,
+      &self.app,
     )
     .await
     {
@@ -740,7 +943,15 @@ impl LibraryNetwork for Network {
 
     loop {
       let query = vec![("limit", limit.to_string()), ("offset", offset.to_string())];
-      match spotify_get_typed_compat_for::<Page<PlaylistItem>>(&self.spotify, &path, &query).await {
+      match spotify_get_typed_compat_for_with_refresh::<Page<PlaylistItem>>(
+        &self.spotify,
+        &path,
+        &query,
+        &self.token_cache_path,
+        &self.app,
+      )
+      .await
+      {
         Ok(page) => {
           if page.items.is_empty() {
             break;
@@ -799,12 +1010,14 @@ impl LibraryNetwork for Network {
       "collaborative": false,
       "description": "Created with spotatui"
     });
-    let playlist_value = match spotify_api_request_json_for(
+    let playlist_value = match spotify_api_request_json_for_with_refresh(
       &self.spotify,
       Method::POST,
       &create_path,
       &[],
       Some(create_body),
+      &self.token_cache_path,
+      &self.app,
     )
     .await
     {
@@ -957,6 +1170,48 @@ mod tests {
     assert!(liked_song_ids_set.contains("0000000000000000000001"));
     assert!(liked_song_ids_set.contains("0000000000000000000002"));
     assert!(!liked_song_ids_set.contains("spotify:track:0000000000000000000001"));
+  }
+
+  #[test]
+  fn playlist_track_filter_matches_title_artist_album_case_insensitively() {
+    let mut track = full_track("0000000000000000000001");
+    track.name = "Midnight City".to_string();
+    track.artists[0].name = "M83".to_string();
+    track.album.name = "Hurry Up".to_string();
+
+    assert!(playlist_track_matches_terms(
+      &track,
+      &playlist_track_search_terms("midnight")
+    ));
+    assert!(playlist_track_matches_terms(
+      &track,
+      &playlist_track_search_terms("m83")
+    ));
+    assert!(playlist_track_matches_terms(
+      &track,
+      &playlist_track_search_terms("hurry")
+    ));
+    assert!(playlist_track_matches_terms(
+      &track,
+      &playlist_track_search_terms("MIDNIGHT m83")
+    ));
+  }
+
+  #[test]
+  fn playlist_track_filter_requires_every_query_term() {
+    let mut track = full_track("0000000000000000000001");
+    track.name = "Midnight City".to_string();
+    track.artists[0].name = "M83".to_string();
+    track.album.name = "Hurry Up".to_string();
+
+    assert!(playlist_track_matches_terms(
+      &track,
+      &playlist_track_search_terms("city hurry")
+    ));
+    assert!(!playlist_track_matches_terms(
+      &track,
+      &playlist_track_search_terms("city missing")
+    ));
   }
 }
 

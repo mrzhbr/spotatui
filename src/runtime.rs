@@ -29,13 +29,17 @@ use crate::cli;
 use crate::core::app::App;
 use crate::core::auth;
 use crate::core::config::ClientConfig;
-use crate::core::user_config::{StartupBehavior, UserConfig, UserConfigPaths};
+use crate::core::user_config::{
+  validate_tick_rate_milliseconds, StartupBehavior, UserConfig, UserConfigPaths,
+};
 #[cfg(feature = "discord-rpc")]
 use crate::infra::discord_rpc;
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 use crate::infra::macos_media;
 #[cfg(all(feature = "mpris", target_os = "linux"))]
 use crate::infra::mpris;
+#[cfg(feature = "streaming")]
+use crate::infra::network::requests::spotify_get_typed_compat_for_with_refresh;
 use crate::infra::network::{IoEvent, Network};
 #[cfg(feature = "streaming")]
 use crate::infra::player;
@@ -43,15 +47,15 @@ use crate::tui::banner::BANNER;
 
 use anyhow::{anyhow, Result};
 use backtrace::Backtrace;
-use clap::{Arg, Command as ClapApp};
+use clap::{Arg, ArgMatches, Command as ClapApp};
 use clap_complete::{generate, Shell};
 use log::info;
 #[cfg(feature = "streaming")]
 use log::warn;
 #[cfg(feature = "streaming")]
-use rspotify::prelude::*;
+use rspotify::{model::user::PrivateUser, AuthCodePkceSpotify};
 #[cfg(feature = "streaming")]
-use rspotify::AuthCodePkceSpotify;
+use std::path::Path;
 #[cfg(feature = "streaming")]
 use std::time::Duration;
 use std::{
@@ -131,8 +135,18 @@ fn subscription_level_label(level: rspotify::model::SubscriptionLevel) -> &'stat
 #[cfg(feature = "streaming")]
 async fn account_supports_native_streaming(
   spotify: &AuthCodePkceSpotify,
+  token_cache_path: &Path,
+  app: &Arc<Mutex<App>>,
 ) -> (bool, Option<&'static str>) {
-  match spotify.me().await {
+  match spotify_get_typed_compat_for_with_refresh::<PrivateUser>(
+    spotify,
+    "me",
+    &[],
+    token_cache_path,
+    app,
+  )
+  .await
+  {
     #[allow(deprecated)]
     Ok(user) => match user.product {
       Some(rspotify::model::SubscriptionLevel::Premium) => (true, None),
@@ -397,6 +411,109 @@ fn install_panic_hook() {
   }));
 }
 
+#[cfg(feature = "self-update")]
+fn add_self_update_cli(clap_app: ClapApp) -> ClapApp {
+  clap_app
+    .arg(
+      Arg::new("no-update")
+        .short('U')
+        .long("no-update")
+        .action(clap::ArgAction::SetTrue)
+        .help("Skip the automatic update check on startup"),
+    )
+    .subcommand(
+      ClapApp::new("update")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("Check for and install updates")
+        .arg(
+          Arg::new("install")
+            .short('i')
+            .long("install")
+            .action(clap::ArgAction::SetTrue)
+            .help("Install the update if available"),
+        ),
+    )
+}
+
+#[cfg(not(feature = "self-update"))]
+fn add_self_update_cli(clap_app: ClapApp) -> ClapApp {
+  clap_app
+}
+
+#[cfg(feature = "self-update")]
+fn handle_self_update_command(matches: &ArgMatches) -> Result<bool> {
+  if let Some(update_matches) = matches.subcommand_matches("update") {
+    let do_install = update_matches.get_flag("install");
+    cli::check_for_update(do_install)?;
+    return Ok(true);
+  }
+
+  Ok(false)
+}
+
+#[cfg(not(feature = "self-update"))]
+fn handle_self_update_command(_matches: &ArgMatches) -> Result<bool> {
+  Ok(false)
+}
+
+#[cfg(feature = "self-update")]
+async fn run_auto_update(matches: &ArgMatches, user_config: &UserConfig) {
+  if matches.subcommand_name().is_some()
+    || std::env::var_os("SPOTATUI_SKIP_UPDATE").is_some()
+    || matches.get_flag("no-update")
+    || user_config.behavior.disable_auto_update
+  {
+    return;
+  }
+
+  println!("Checking for updates...");
+  // Must use spawn_blocking because self_update uses reqwest::blocking internally,
+  // which creates its own tokio runtime and panics if called from an async context.
+  let delay_secs =
+    crate::core::user_config::parse_update_delay_secs(&user_config.behavior.auto_update_delay)
+      .unwrap_or(0);
+  let update_result = tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+
+  match update_result {
+    Some(cli::UpdateOutcome::Installed(new_version)) => {
+      println!("Updated to v{}! Restarting...", new_version);
+      // Re-exec the current binary with the same args, skipping the update check.
+      let exe = std::env::current_exe().expect("failed to get current executable path");
+      let args: Vec<String> = std::env::args().skip(1).collect();
+      let status = std::process::Command::new(&exe)
+        .args(&args)
+        .env("SPOTATUI_SKIP_UPDATE", "1")
+        .status();
+      match status {
+        Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
+        Err(e) => {
+          eprintln!("Failed to restart after update: {}", e);
+          eprintln!("Please restart spotatui manually.");
+          std::process::exit(1);
+        }
+      }
+    }
+    Some(cli::UpdateOutcome::Pending {
+      version,
+      secs_remaining,
+    }) => {
+      println!(
+        "Update v{} detected — will install in {}. Run `spotatui update --install` to update now.",
+        version,
+        crate::core::user_config::format_update_delay_secs(secs_remaining)
+      );
+    }
+    // Up-to-date, check failed, or no update — continue normally.
+    _ => {}
+  }
+}
+
+#[cfg(not(feature = "self-update"))]
+async fn run_auto_update(_matches: &ArgMatches, _user_config: &UserConfig) {}
+
 pub async fn run() -> Result<()> {
   setup_logging()?;
   info!("spotatui {} starting up", env!("CARGO_PKG_VERSION"));
@@ -406,7 +523,8 @@ pub async fn run() -> Result<()> {
   install_panic_hook();
   info!("panic hook configured");
 
-  let mut clap_app = ClapApp::new(env!("CARGO_PKG_NAME"))
+  let mut clap_app = add_self_update_cli(
+    ClapApp::new(env!("CARGO_PKG_NAME"))
     .version(env!("CARGO_PKG_VERSION"))
     .author(env!("CARGO_PKG_AUTHORS"))
     .about(env!("CARGO_PKG_DESCRIPTION"))
@@ -419,11 +537,10 @@ pub async fn run() -> Result<()> {
       Arg::new("tick-rate")
         .short('t')
         .long("tick-rate")
-        .help("Set the tick rate (milliseconds): the lower the number the higher the FPS.")
+        .help("Set the normal UI tick rate in milliseconds.")
         .long_help(
-          "Specify the tick rate in milliseconds: the lower the number the \
-higher the FPS. It can be nicer to have a lower value when you want to use the audio analysis view \
-of the app. Beware that this comes at a CPU cost!",
+          "Specify the normal UI tick rate in milliseconds. Lower values refresh non-animated \
+screens more often and cost more CPU. Animation-heavy views keep their separate animation tick rate.",
         ),
     )
     .arg(
@@ -439,13 +556,6 @@ of the app. Beware that this comes at a CPU cost!",
         .help("Rerun client authentication setup wizard"),
     )
     .arg(
-      Arg::new("no-update")
-        .short('U')
-        .long("no-update")
-        .action(clap::ArgAction::SetTrue)
-        .help("Skip the automatic update check on startup"),
-    )
-    .arg(
       Arg::new("completions")
         .long("completions")
         .help("Generates completions for your preferred shell")
@@ -456,20 +566,9 @@ of the app. Beware that this comes at a CPU cost!",
     .subcommand(cli::playback_subcommand())
     .subcommand(cli::play_subcommand())
     .subcommand(cli::list_subcommand())
-    .subcommand(cli::search_subcommand())
-    // Self-update command
-    .subcommand(
-      ClapApp::new("update")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Check for and install updates")
-        .arg(
-          Arg::new("install")
-            .short('i')
-            .long("install")
-            .action(clap::ArgAction::SetTrue)
-            .help("Install the update if available"),
-        ),
-    );
+    .subcommand(cli::history_subcommand())
+    .subcommand(cli::search_subcommand()),
+  );
 
   let matches = clap_app.clone().get_matches();
 
@@ -488,9 +587,13 @@ of the app. Beware that this comes at a CPU cost!",
   }
 
   // Handle self-update command (doesn't need Spotify auth)
-  if let Some(update_matches) = matches.subcommand_matches("update") {
-    let do_install = update_matches.get_flag("install");
-    return cli::check_for_update(do_install);
+  if handle_self_update_command(&matches)? {
+    return Ok(());
+  }
+
+  if let Some(history_matches) = matches.subcommand_matches("history") {
+    println!("{}", cli::handle_history_matches(history_matches)?);
+    return Ok(());
   }
 
   // Auto-update on launch: silently check, download, install, and restart.
@@ -504,60 +607,7 @@ of the app. Beware that this comes at a CPU cost!",
   user_config.load_config()?;
   info!("user config loaded successfully");
 
-  if matches.subcommand_name().is_none()
-    && std::env::var_os("SPOTATUI_SKIP_UPDATE").is_none()
-    && !matches.get_flag("no-update")
-    && !user_config.behavior.disable_auto_update
-  {
-    println!("Checking for updates...");
-    // Must use spawn_blocking because self_update uses reqwest::blocking internally,
-    // which creates its own tokio runtime and panics if called from an async context.
-    let delay_secs = cli::parse_delay_secs(&user_config.behavior.auto_update_delay).unwrap_or(0);
-    let update_result = tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
-      .await
-      .ok()
-      .and_then(|r| r.ok());
-    match update_result {
-      Some(cli::UpdateOutcome::Installed(new_version)) => {
-        println!("Updated to v{}! Restarting...", new_version);
-        // Re-exec the current binary with the same args, skipping the update check
-        let exe = std::env::current_exe().expect("failed to get current executable path");
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let status = std::process::Command::new(&exe)
-          .args(&args)
-          .env("SPOTATUI_SKIP_UPDATE", "1")
-          .status();
-        match status {
-          Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
-          Err(e) => {
-            eprintln!("Failed to restart after update: {}", e);
-            eprintln!("Please restart spotatui manually.");
-            std::process::exit(1);
-          }
-        }
-      }
-      Some(cli::UpdateOutcome::Pending {
-        version,
-        secs_remaining,
-      }) => {
-        let human = if secs_remaining >= 86400 {
-          format!("{}d", secs_remaining / 86400)
-        } else if secs_remaining >= 3600 {
-          format!("{}h", secs_remaining / 3600)
-        } else if secs_remaining >= 60 {
-          format!("{}m", secs_remaining / 60)
-        } else {
-          format!("{}s", secs_remaining)
-        };
-        println!(
-          "Update v{} detected — will install in {}. Run `spotatui update --install` to update now.",
-          version, human
-        );
-      }
-      // Up-to-date, check failed, or no update — continue normally
-      _ => {}
-    }
-  }
+  run_auto_update(&matches, &user_config).await;
 
   let initial_shuffle_enabled = user_config.behavior.shuffle_enabled;
   let initial_startup_behavior = user_config.behavior.startup_behavior;
@@ -566,11 +616,8 @@ of the app. Beware that this comes at a CPU cost!",
     .get_one::<String>("tick-rate")
     .and_then(|tick_rate| tick_rate.parse().ok())
   {
-    if tick_rate >= 1000 {
-      panic!("Tick rate must be below 1000");
-    } else {
-      user_config.behavior.tick_rate_milliseconds = tick_rate;
-    }
+    user_config.behavior.tick_rate_milliseconds =
+      validate_tick_rate_milliseconds(tick_rate, "Tick rate")?;
   }
 
   let mut client_config = ClientConfig::new();
@@ -690,10 +737,8 @@ of the app. Beware that this comes at a CPU cost!",
   #[cfg(feature = "streaming")]
   let selected_redirect_uri = authenticated.redirect_uri;
 
-  // Persist whatever token is now in memory. rspotify's auto_reauth (token_refreshing=true)
-  // silently refreshes the token during the spotify.me() probe in ensure_auth_token, rotating
-  // the refresh_token but never writing the result to disk (token_cached=false by default).
-  // Saving here ensures the on-disk token is always the current one, not the original stale one.
+  // Persist whatever token is now in memory. All later Spotify requests go through
+  // spotatui's refresh-and-cache path so the on-disk token stays current.
   if let Err(e) = auth::save_token_to_file(&spotify, &final_token_cache_path).await {
     log::warn!("Failed to cache token on startup: {}", e);
   }
@@ -726,10 +771,11 @@ of the app. Beware that this comes at a CPU cost!",
   // Launch the UI (async)
   } else {
     info!("launching interactive terminal ui");
+    crate::infra::history::spawn_history_collector(Arc::clone(&app));
     #[cfg(feature = "streaming")]
     let (streaming_supported_for_account, streaming_startup_status_message) =
       if client_config.enable_streaming {
-        account_supports_native_streaming(&spotify).await
+        account_supports_native_streaming(&spotify, &final_token_cache_path, &app).await
       } else {
         (false, None)
       };
@@ -1030,7 +1076,11 @@ of the app. Beware that this comes at a CPU cost!",
         let saved_device_id = network.client_config.device_id.clone();
         let mut devices_snapshot = None;
 
-        if let Ok(devices_vec) = network.spotify.device().await {
+        if let Ok(devices) = network
+          .spotify_get_typed::<rspotify::model::device::DevicePayload>("me/player/devices", &[])
+          .await
+        {
+          let devices_vec = devices.devices;
           let mut app = network.app.lock().await;
           app.devices = Some(rspotify::model::device::DevicePayload {
             devices: devices_vec.clone(),

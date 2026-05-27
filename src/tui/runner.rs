@@ -1,4 +1,5 @@
 use crate::core::app::{self, ActiveBlock, App, RouteId};
+use crate::core::auth;
 use crate::core::user_config::UserConfig;
 #[cfg(any(feature = "audio-viz", feature = "audio-viz-cpal"))]
 use crate::infra::audio;
@@ -30,6 +31,13 @@ use std::{
   time::SystemTime,
 };
 use tokio::sync::Mutex;
+
+const DEFAULT_WINDOW_TITLE: &str = "spt - spotatui";
+
+#[derive(Default)]
+struct WindowTitleState {
+  last_title: Option<String>,
+}
 
 #[cfg(feature = "discord-rpc")]
 pub type DiscordRpcHandle = Option<discord_rpc::DiscordRpcManager>;
@@ -153,6 +161,152 @@ fn update_discord_presence(
         state.last_progress_ms = 0;
       }
     }
+  }
+}
+
+fn playback_window_title(app: &App) -> String {
+  let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) else {
+    return DEFAULT_WINDOW_TITLE.to_string();
+  };
+
+  let title = sanitize_window_title_component(&snapshot.metadata.title);
+  let artist = sanitize_window_title_component(&snapshot.primary_artist());
+  if artist.trim().is_empty() {
+    title
+  } else {
+    format!("{} — {}", title, artist)
+  }
+}
+
+fn sanitize_window_title_component(value: &str) -> String {
+  value.chars().filter(|c| !c.is_control()).collect()
+}
+
+fn next_window_title(state: &mut WindowTitleState, app: &App) -> Option<String> {
+  if !app.user_config.behavior.set_window_title {
+    return state
+      .last_title
+      .take()
+      .map(|_| DEFAULT_WINDOW_TITLE.to_string());
+  }
+
+  let title = playback_window_title(app);
+  if state.last_title.as_ref() == Some(&title) {
+    None
+  } else {
+    state.last_title = Some(title.clone());
+    Some(title)
+  }
+}
+
+fn reset_window_title(state: &mut WindowTitleState) -> Result<()> {
+  if state
+    .last_title
+    .as_deref()
+    .is_some_and(|title| title != DEFAULT_WINDOW_TITLE)
+  {
+    execute!(stdout(), SetTitle(DEFAULT_WINDOW_TITLE))?;
+    state.last_title = None;
+  }
+  Ok(())
+}
+
+fn back_key_clears_playlist_filter(app: &mut App, active_block: ActiveBlock) -> bool {
+  if active_block == ActiveBlock::TrackTable && app.is_playlist_track_filter_active() {
+    app.clear_playlist_track_filter();
+    true
+  } else {
+    false
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::app::{NativeTrackInfo, TrackTableContext};
+  use rspotify::model::idtypes::PlaylistId;
+  use std::{sync::mpsc::channel, time::SystemTime};
+
+  fn app() -> App {
+    let (tx, _rx) = channel();
+    App::new(
+      tx,
+      crate::core::user_config::UserConfig::new(),
+      SystemTime::now(),
+    )
+  }
+
+  #[test]
+  fn playback_window_title_uses_current_native_track() {
+    let mut app = app();
+    app.is_streaming_active = true;
+    app.native_track_info = Some(NativeTrackInfo {
+      name: "The Track".to_string(),
+      artists_display: "The Artist".to_string(),
+      album: "The Album".to_string(),
+      duration_ms: 180_000,
+      kind: crate::core::app::NativeTrackKind::Track,
+    });
+
+    assert_eq!(playback_window_title(&app), "The Track — The Artist");
+  }
+
+  #[test]
+  fn playback_window_title_strips_control_characters() {
+    let mut app = app();
+    app.is_streaming_active = true;
+    app.native_track_info = Some(NativeTrackInfo {
+      name: "The\x1b]2;Bad\x07 Track".to_string(),
+      artists_display: "The\nArtist".to_string(),
+      album: "The Album".to_string(),
+      duration_ms: 180_000,
+      kind: crate::core::app::NativeTrackKind::Track,
+    });
+
+    assert_eq!(playback_window_title(&app), "The]2;Bad Track — TheArtist");
+  }
+
+  #[test]
+  fn playback_window_title_falls_back_without_playback() {
+    let app = app();
+
+    assert_eq!(playback_window_title(&app), DEFAULT_WINDOW_TITLE);
+  }
+
+  #[test]
+  fn disabling_window_title_restores_default_once() {
+    let mut app = app();
+    let mut state = WindowTitleState {
+      last_title: Some("The Track — The Artist".to_string()),
+    };
+    app.user_config.behavior.set_window_title = false;
+
+    assert_eq!(
+      next_window_title(&mut state, &app).as_deref(),
+      Some(DEFAULT_WINDOW_TITLE)
+    );
+    assert_eq!(next_window_title(&mut state, &app), None);
+  }
+
+  #[test]
+  fn back_key_clears_playlist_filter_before_navigation_pop() {
+    let mut app = app();
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(
+      PlaylistId::from_id("37i9dQZF1DX4WYpdgoIcn6")
+        .unwrap()
+        .into_static(),
+    );
+    app.active_playlist_track_filter = Some("query".to_string());
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+
+    assert!(back_key_clears_playlist_filter(
+      &mut app,
+      ActiveBlock::TrackTable
+    ));
+
+    assert!(app.active_playlist_track_filter.is_none());
+    assert_eq!(app.get_current_route().id, RouteId::TrackTable);
   }
 }
 
@@ -283,10 +437,6 @@ pub async fn start_ui(
     app.terminal_input_caps.ctrl_punct_reliable = app::CapabilityState::Unknown;
   }
 
-  if user_config.behavior.set_window_title {
-    execute!(stdout(), SetTitle("spt - spotatui"))?;
-  }
-
   let events = event::Events::new(user_config.behavior.tick_rate_milliseconds);
 
   #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -301,11 +451,12 @@ pub async fn start_ui(
   #[cfg(all(feature = "mpris", target_os = "linux"))]
   let mut mpris_state = MprisState::default();
 
+  let mut window_title_state = WindowTitleState::default();
   let mut is_first_render = true;
 
   loop {
     let terminal_size = terminal.backend().size().ok();
-    {
+    let title_update = {
       let mut app = app.lock().await;
 
       #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -345,6 +496,17 @@ pub async fn start_ui(
       };
 
       let current_route = app.get_current_route();
+      let animation_active = matches!(
+        current_route.active_block,
+        ActiveBlock::Analysis | ActiveBlock::Home
+      ) || app.liked_song_animation_frame.is_some();
+      let current_tick_rate = if animation_active {
+        app.user_config.behavior.animation_tick_rate_milliseconds
+      } else {
+        app.user_config.behavior.tick_rate_milliseconds
+      };
+      events.set_tick_rate(current_tick_rate);
+
       terminal.draw(|f| {
         use ratatui::{prelude::Style, widgets::Block};
         f.render_widget(
@@ -394,9 +556,16 @@ pub async fn start_ui(
         cursor_offset,
       ))?;
 
-      if SystemTime::now() > app.spotify_token_expiry {
+      if auth::should_refresh_token_at(app.spotify_token_expiry, SystemTime::now())
+        && !app.auth_refresh_in_progress
+      {
+        app.auth_refresh_in_progress = true;
         app.dispatch(IoEvent::RefreshAuthentication);
       }
+      next_window_title(&mut window_title_state, &app)
+    };
+    if let Some(title) = title_update {
+      execute!(stdout(), SetTitle(title.as_str()))?;
     }
 
     match events.next()? {
@@ -426,30 +595,32 @@ pub async fn start_ui(
         } else if current_active_block == ActiveBlock::Input {
           handlers::input_handler(key, &mut app);
         } else if key == app.user_config.keys.back {
-          if current_active_block == ActiveBlock::Settings {
-            handlers::handle_app(key, &mut app);
-          } else if app.get_current_route().active_block == ActiveBlock::AnnouncementPrompt {
-            if let Some(dismissed_id) = app.dismiss_active_announcement() {
-              app.user_config.mark_announcement_seen(dismissed_id);
-              if let Err(error) = app.user_config.save_config() {
-                app.handle_error(anyhow!(
-                  "Failed to persist dismissed announcement: {}",
-                  error
-                ));
+          if !back_key_clears_playlist_filter(&mut app, current_active_block) {
+            if current_active_block == ActiveBlock::Settings {
+              handlers::handle_app(key, &mut app);
+            } else if app.get_current_route().active_block == ActiveBlock::AnnouncementPrompt {
+              if let Some(dismissed_id) = app.dismiss_active_announcement() {
+                app.user_config.mark_announcement_seen(dismissed_id);
+                if let Err(error) = app.user_config.save_config() {
+                  app.handle_error(anyhow!(
+                    "Failed to persist dismissed announcement: {}",
+                    error
+                  ));
+                }
               }
-            }
 
-            if app.active_announcement.is_none() {
-              app.pop_navigation_stack();
-            }
-          } else if app.get_current_route().active_block != ActiveBlock::Input {
-            let pop_result = match app.pop_navigation_stack() {
-              Some(ref x) if x.id == RouteId::Search => app.pop_navigation_stack(),
-              Some(x) => Some(x),
-              None => None,
-            };
-            if pop_result.is_none() {
-              app.push_navigation_stack(RouteId::ExitPrompt, ActiveBlock::ExitPrompt);
+              if app.active_announcement.is_none() {
+                app.pop_navigation_stack();
+              }
+            } else if app.get_current_route().active_block != ActiveBlock::Input {
+              let pop_result = match app.pop_navigation_stack() {
+                Some(ref x) if x.id == RouteId::Search => app.pop_navigation_stack(),
+                Some(x) => Some(x),
+                None => None,
+              };
+              if pop_result.is_none() {
+                app.push_navigation_stack(RouteId::ExitPrompt, ActiveBlock::ExitPrompt);
+              }
             }
           }
         } else {
@@ -462,7 +633,7 @@ pub async fn start_ui(
           handlers::mouse_handler(mouse, &mut app);
         }
       }
-      event::Event::Tick => {
+      event::Event::Tick(elapsed) => {
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         {
           use objc2_foundation::{NSDate, NSRunLoop};
@@ -470,7 +641,7 @@ pub async fn start_ui(
         }
 
         let mut app = app.lock().await;
-        app.update_on_tick();
+        app.update_on_tick(elapsed);
 
         #[cfg(feature = "streaming")]
         app.flush_pending_native_seek();
@@ -557,6 +728,20 @@ pub async fn start_ui(
   #[cfg(feature = "streaming")]
   pause_native_playback_before_exit(app).await;
 
+  // Sync history to cloud on exit
+  let sync_token_opt = {
+    let app_guard = app.lock().await;
+    app_guard.user_config.behavior.sync_token.clone()
+  };
+
+  if let Some(token) = sync_token_opt {
+    info!("Synchronizing listening history to cloud before exit...");
+    if let Err(e) = crate::infra::history::sync_history_to_cloud(&token).await {
+      log::warn!("failed to run exit history cloud sync: {}", e);
+    }
+  }
+
+  reset_window_title(&mut window_title_state)?;
   execute!(stdout(), DisableMouseCapture)?;
   if keyboard_enhancement_enabled {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

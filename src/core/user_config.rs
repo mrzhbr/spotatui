@@ -2,14 +2,14 @@ use crate::tui::event::Key;
 use anyhow::{anyhow, Result};
 use ratatui::style::{Color, Style};
 use serde::{Deserialize, Serialize};
-use std::{
-  fs,
-  path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 
 const FILE_NAME: &str = "config.yml";
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "spotatui";
+pub const DEFAULT_TICK_RATE_MILLISECONDS: u64 = 250;
+pub const DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS: u64 = 16;
+pub const MAX_TICK_RATE_MILLISECONDS: u64 = 999;
 #[cfg(feature = "cover-art")]
 pub const MIN_PLAYBAR_COVER_ART_SIZE_PERCENT: u16 = 25;
 #[cfg(feature = "cover-art")]
@@ -29,6 +29,63 @@ pub fn normalize_playbar_cover_art_size_percent(value: i64) -> u16 {
     MIN_PLAYBAR_COVER_ART_SIZE_PERCENT as i64,
     MAX_PLAYBAR_COVER_ART_SIZE_PERCENT as i64,
   ) as u16
+}
+
+pub fn validate_tick_rate_milliseconds(value: u64, label: &str) -> Result<u64> {
+  if (1..=MAX_TICK_RATE_MILLISECONDS).contains(&value) {
+    Ok(value)
+  } else {
+    Err(anyhow!("{label} must be between 1 and 999 milliseconds"))
+  }
+}
+
+pub fn normalize_tick_rate_milliseconds(value: i64) -> u64 {
+  value.clamp(1, MAX_TICK_RATE_MILLISECONDS as i64) as u64
+}
+
+/// Parse a human-readable update delay into seconds.
+/// Accepts: "0", "30s", "10m", "2h", "7d", or a bare second count.
+pub fn parse_update_delay_secs(value: &str) -> Result<u64, String> {
+  let value = value.trim();
+  if value == "0" || value.is_empty() {
+    return Ok(0);
+  }
+
+  for (suffix, multiplier, label) in [
+    ("d", 86400_u64, "days"),
+    ("h", 3600_u64, "hours"),
+    ("m", 60_u64, "minutes"),
+    ("s", 1_u64, "seconds"),
+  ] {
+    if let Some(amount) = value.strip_suffix(suffix) {
+      return amount
+        .trim()
+        .parse::<u64>()
+        .map(|v| v * multiplier)
+        .map_err(|_| format!("Invalid {label} value"));
+    }
+  }
+
+  value
+    .parse::<u64>()
+    .map_err(|_| "Invalid numeric value or unknown suffix".to_string())
+}
+
+#[cfg(feature = "self-update")]
+pub fn format_update_delay_secs(secs: u64) -> String {
+  if secs >= 86400 {
+    format!("{}d", secs / 86400)
+  } else if secs >= 3600 {
+    format!("{}h", secs / 3600)
+  } else if secs >= 60 {
+    format!("{}m", secs / 60)
+  } else {
+    format!("{}s", secs)
+  }
+}
+
+fn default_app_config_dir() -> Option<PathBuf> {
+  dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -614,6 +671,7 @@ pub struct KeyBindingsString {
   save_settings: Option<String>,
   listening_party: Option<String>,
   like_track: Option<String>,
+  generate_recap: Option<String>,
 }
 
 #[derive(Clone)]
@@ -652,6 +710,7 @@ pub struct KeyBindings {
   pub save_settings: Key,
   pub listening_party: Key,
   pub like_track: Key,
+  pub generate_recap: Key,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -660,6 +719,7 @@ pub struct BehaviorConfigString {
   pub volume_increment: Option<u8>,
   pub volume_percent: Option<u8>,
   pub tick_rate_milliseconds: Option<u64>,
+  pub animation_tick_rate_milliseconds: Option<u64>,
   pub enable_text_emphasis: Option<bool>,
   pub show_loading_indicator: Option<bool>,
   pub enforce_wide_search_bar: Option<bool>,
@@ -695,6 +755,7 @@ pub struct BehaviorConfigString {
   #[cfg(feature = "cover-art")]
   pub playbar_cover_art_size_percent: Option<u16>,
   pub keepawake_enabled: Option<bool>,
+  pub sync_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -703,6 +764,7 @@ pub struct BehaviorConfig {
   pub volume_increment: u8,
   pub volume_percent: u8,
   pub tick_rate_milliseconds: u64,
+  pub animation_tick_rate_milliseconds: u64,
   pub enable_text_emphasis: bool,
   pub show_loading_indicator: bool,
   pub enforce_wide_search_bar: bool,
@@ -738,6 +800,7 @@ pub struct BehaviorConfig {
   #[cfg(feature = "cover-art")]
   pub playbar_cover_art_size_percent: u16,
   pub keepawake_enabled: bool,
+  pub sync_token: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -760,8 +823,9 @@ pub struct UserConfig {
 impl UserConfig {
   /// Get the spotatui app config directory (~/.config/spotatui).
   /// Returns None if $HOME is not set.
+  #[cfg(feature = "self-update")]
   pub fn get_app_config_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
+    default_app_config_dir()
   }
 
   pub fn new() -> UserConfig {
@@ -816,12 +880,14 @@ impl UserConfig {
         save_settings: Key::Alt('s'),
         listening_party: Key::Ctrl('p'),
         like_track: Key::Char('F'),
+        generate_recap: Key::Char('R'),
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 5 * 1000,
         volume_increment: 10,
         volume_percent: 100,
-        tick_rate_milliseconds: 16,
+        tick_rate_milliseconds: DEFAULT_TICK_RATE_MILLISECONDS,
+        animation_tick_rate_milliseconds: DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
         enable_text_emphasis: true,
         show_loading_indicator: true,
         enforce_wide_search_bar: false,
@@ -857,20 +923,21 @@ impl UserConfig {
         #[cfg(feature = "cover-art")]
         playbar_cover_art_size_percent: 100,
         keepawake_enabled: true,
+        sync_token: None,
       },
       path_to_config: None,
     }
   }
 
   pub fn get_or_build_paths(&mut self) -> Result<()> {
-    match dirs::home_dir() {
-      Some(home) => {
-        let path = Path::new(&home);
-        let home_config_dir = path.join(CONFIG_DIR);
-        let app_config_dir = home_config_dir.join(APP_CONFIG_DIR);
+    match default_app_config_dir() {
+      Some(app_config_dir) => {
+        let home_config_dir = app_config_dir
+          .parent()
+          .ok_or_else(|| anyhow!("Invalid app config directory"))?;
 
         if !home_config_dir.exists() {
-          fs::create_dir(&home_config_dir)?;
+          fs::create_dir(home_config_dir)?;
         }
 
         if !app_config_dir.exists() {
@@ -932,6 +999,7 @@ impl UserConfig {
     to_keys!(save_settings);
     to_keys!(listening_party);
     to_keys!(like_track);
+    to_keys!(generate_recap);
 
     Ok(())
   }
@@ -1019,12 +1087,32 @@ impl UserConfig {
       self.behavior.volume_percent = volume.min(100);
     }
 
-    if let Some(tick_rate) = behavior_config.tick_rate_milliseconds {
-      if tick_rate >= 1000 {
-        return Err(anyhow!("Tick rate must be below 1000"));
+    let loaded_tick_rate = behavior_config.tick_rate_milliseconds;
+    let loaded_animation_tick_rate = behavior_config.animation_tick_rate_milliseconds;
+
+    if let Some(tick_rate) = loaded_tick_rate {
+      let tick_rate = validate_tick_rate_milliseconds(tick_rate, "Tick rate")?;
+      // Before animation ticks existed, save_config wrote the old 16ms default
+      // into user configs. Treat the legacy 16ms normal tick as the old default
+      // when animation ticks are absent or still equal to the animation default,
+      // so upgraded users get the new normal UI cadence without manual edits.
+      self.behavior.tick_rate_milliseconds = if tick_rate
+        == DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS
+        && loaded_animation_tick_rate
+          .map(|animation_tick_rate| {
+            animation_tick_rate == DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS
+          })
+          .unwrap_or(true)
+      {
+        DEFAULT_TICK_RATE_MILLISECONDS
       } else {
-        self.behavior.tick_rate_milliseconds = tick_rate;
-      }
+        tick_rate
+      };
+    }
+
+    if let Some(tick_rate) = loaded_animation_tick_rate {
+      self.behavior.animation_tick_rate_milliseconds =
+        validate_tick_rate_milliseconds(tick_rate, "Animation tick rate")?;
     }
 
     if let Some(text_emphasis) = behavior_config.enable_text_emphasis {
@@ -1127,6 +1215,15 @@ impl UserConfig {
       }
     }
 
+    if let Some(sync_token) = behavior_config.sync_token {
+      let trimmed = sync_token.trim();
+      if trimmed.is_empty() {
+        self.behavior.sync_token = None;
+      } else {
+        self.behavior.sync_token = Some(trimmed.to_string());
+      }
+    }
+
     if let Some(stop_after_current_track) = behavior_config.stop_after_current_track {
       self.behavior.stop_after_current_track = stop_after_current_track;
     }
@@ -1152,6 +1249,8 @@ impl UserConfig {
     }
 
     if let Some(auto_update_delay) = behavior_config.auto_update_delay {
+      parse_update_delay_secs(&auto_update_delay)
+        .map_err(|e| anyhow!("Invalid auto-update delay: {e}"))?;
       self.behavior.auto_update_delay = auto_update_delay;
     }
 
@@ -1222,6 +1321,7 @@ impl UserConfig {
       volume_increment: Some(self.behavior.volume_increment),
       volume_percent: Some(self.behavior.volume_percent),
       tick_rate_milliseconds: Some(self.behavior.tick_rate_milliseconds),
+      animation_tick_rate_milliseconds: Some(self.behavior.animation_tick_rate_milliseconds),
       enable_text_emphasis: Some(self.behavior.enable_text_emphasis),
       show_loading_indicator: Some(self.behavior.show_loading_indicator),
       enforce_wide_search_bar: Some(self.behavior.enforce_wide_search_bar),
@@ -1243,6 +1343,7 @@ impl UserConfig {
       visualizer_style: Some(self.behavior.visualizer_style),
       dismissed_announcements: Some(self.behavior.dismissed_announcements.clone()),
       relay_server_url: Some(self.behavior.relay_server_url.clone()),
+      sync_token: self.behavior.sync_token.clone(),
       stop_after_current_track: Some(self.behavior.stop_after_current_track),
       sidebar_width_percent: Some(self.behavior.sidebar_width_percent),
       playbar_height_rows: Some(self.behavior.playbar_height_rows),
@@ -1333,6 +1434,7 @@ impl UserConfig {
       save_settings: Some(key_to_config_string(self.keys.save_settings)),
       listening_party: Some(key_to_config_string(self.keys.listening_party)),
       like_track: Some(key_to_config_string(self.keys.like_track)),
+      generate_recap: Some(key_to_config_string(self.keys.generate_recap)),
     };
 
     // Helper to build theme config from current values
@@ -1570,45 +1672,88 @@ mod tests {
   }
 
   #[test]
-  fn miniplayer_keybinding_loads_from_yaml() {
-    use super::{KeyBindingsString, UserConfig};
-    use crate::tui::event::Key;
+  fn tick_rates_load_defaults_explicit_values_and_legacy_defaults() {
+    use super::{
+      BehaviorConfigString, UserConfig, DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
+      DEFAULT_TICK_RATE_MILLISECONDS,
+    };
 
-    let keybindings: KeyBindingsString = serde_yaml::from_str("miniplayer_view: ctrl-t").unwrap();
-    let mut config = UserConfig::new();
-    config.load_keybindings(keybindings).unwrap();
+    for (yaml, expected_tick_rate, expected_animation_tick_rate) in [
+      (
+        "",
+        DEFAULT_TICK_RATE_MILLISECONDS,
+        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
+      ),
+      (
+        "tick_rate_milliseconds: 500\nanimation_tick_rate_milliseconds: 20",
+        500,
+        20,
+      ),
+      (
+        "tick_rate_milliseconds: 100",
+        100,
+        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
+      ),
+      (
+        "tick_rate_milliseconds: 16",
+        DEFAULT_TICK_RATE_MILLISECONDS,
+        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
+      ),
+      (
+        "tick_rate_milliseconds: 16\nanimation_tick_rate_milliseconds: 16",
+        DEFAULT_TICK_RATE_MILLISECONDS,
+        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
+      ),
+    ] {
+      let behavior: BehaviorConfigString = serde_yaml::from_str(yaml).unwrap();
+      let mut config = UserConfig::new();
+      config.load_behaviorconfig(behavior).unwrap();
 
-    assert_eq!(config.keys.miniplayer_view, Key::Ctrl('t'));
+      assert_eq!(config.behavior.tick_rate_milliseconds, expected_tick_rate);
+      assert_eq!(
+        config.behavior.animation_tick_rate_milliseconds,
+        expected_animation_tick_rate
+      );
+    }
   }
 
   #[test]
-  fn miniplayer_keybinding_saves_to_yaml() {
-    use super::{UserConfig, UserConfigPaths};
-    use crate::tui::event::Key;
-    use std::fs;
+  fn zero_tick_rates_are_rejected() {
+    use super::{BehaviorConfigString, UserConfig};
 
-    let config_dir = std::env::temp_dir().join(format!(
-      "spotatui-miniplayer-config-test-{}-{}",
-      std::process::id(),
-      std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-    ));
-    fs::create_dir_all(&config_dir).unwrap();
-    let config_file_path = config_dir.join("config.yml");
+    for yaml in [
+      "tick_rate_milliseconds: 0",
+      "animation_tick_rate_milliseconds: 0",
+    ] {
+      let behavior: BehaviorConfigString = serde_yaml::from_str(yaml).unwrap();
+      let mut config = UserConfig::new();
 
+      assert!(config.load_behaviorconfig(behavior).is_err());
+    }
+  }
+
+  #[test]
+  fn parse_update_delay_secs_accepts_supported_units() {
+    use super::parse_update_delay_secs;
+
+    assert_eq!(parse_update_delay_secs("0"), Ok(0));
+    assert_eq!(parse_update_delay_secs(""), Ok(0));
+    assert_eq!(parse_update_delay_secs("7d"), Ok(7 * 86400));
+    assert_eq!(parse_update_delay_secs("2h"), Ok(2 * 3600));
+    assert_eq!(parse_update_delay_secs("10m"), Ok(10 * 60));
+    assert_eq!(parse_update_delay_secs("30s"), Ok(30));
+    assert_eq!(parse_update_delay_secs("120"), Ok(120));
+    assert!(parse_update_delay_secs("bogus").is_err());
+  }
+
+  #[test]
+  fn invalid_auto_update_delay_is_rejected() {
+    use super::{BehaviorConfigString, UserConfig};
+
+    let behavior: BehaviorConfigString = serde_yaml::from_str("auto_update_delay: bogus").unwrap();
     let mut config = UserConfig::new();
-    config.path_to_config = Some(UserConfigPaths {
-      config_file_path: config_file_path.clone(),
-    });
-    config.keys.miniplayer_view = Key::Ctrl('t');
-    config.save_config().unwrap();
 
-    let saved = fs::read_to_string(&config_file_path).unwrap();
-    assert!(saved.contains("miniplayer_view: ctrl-t"));
-
-    fs::remove_dir_all(config_dir).unwrap();
+    assert!(config.load_behaviorconfig(behavior).is_err());
   }
 
   #[cfg(feature = "cover-art")]

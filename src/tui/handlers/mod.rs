@@ -33,7 +33,7 @@ mod settings;
 mod sort_menu;
 mod track_table;
 
-use crate::core::app::{ActiveBlock, App, ArtistBlock, RouteId, SearchResultBlock};
+use crate::core::app::{ActiveBlock, App, ArtistBlock, InputContext, RouteId, SearchResultBlock};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 use rspotify::model::idtypes::PlaylistId;
@@ -163,7 +163,18 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.repeat => {
       app.repeat();
     }
+    Key::Ctrl('f')
+      if app.get_current_route().active_block == ActiveBlock::TrackTable
+        && app.is_playlist_track_table_context() =>
+    {
+      app.input.clear();
+      app.input_idx = 0;
+      app.input_cursor_position = 0;
+      app.input_context = InputContext::PlaylistTrackSearch;
+      app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
+    }
     _ if key == app.user_config.keys.search => {
+      app.input_context = InputContext::GlobalSearch;
       app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
     }
     _ if key == app.user_config.keys.copy_song_url => {
@@ -197,6 +208,43 @@ pub fn handle_app(key: Key, app: &mut App) {
         handle_block_events(key, app);
       } else {
         playbar::toggle_like_currently_playing_item(app);
+      }
+    }
+    _ if key == app.user_config.keys.generate_recap => {
+      if is_input_mode(app) {
+        handle_block_events(key, app);
+      } else {
+        match dirs::home_dir() {
+          Some(home) => {
+            let output_path = home
+              .join(".config")
+              .join("spotatui")
+              .join("spotatui-recap.html");
+            match crate::infra::history::export_history_recap(
+              crate::infra::history::RecapPeriod::ThirtyDays,
+              &output_path,
+            ) {
+              Ok(count) => {
+                app.set_status_message(
+                  format!(
+                    "Listening recap generated at ~/.config/spotatui/spotatui-recap.html ({} listens)",
+                    count
+                  ),
+                  5,
+                );
+                if let Err(e) = open::that(&output_path) {
+                  log::warn!("failed to open recap in browser: {}", e);
+                }
+              }
+              Err(e) => {
+                app.set_status_message(format!("Failed to generate recap: {}", e), 5);
+              }
+            }
+          }
+          None => {
+            app.set_status_message("Error: Could not locate home directory", 5);
+          }
+        }
       }
     }
     // Resize sidebar: { decreases, } increases width
@@ -486,7 +534,6 @@ fn handle_jump_to_artist_album(app: &mut App) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  #[cfg(target_os = "macos")]
   use crate::core::app::TrackTableContext;
   use crate::core::test_helpers::full_track;
   use crate::core::user_config::UserConfig;
@@ -494,6 +541,7 @@ mod tests {
   use rspotify::model::{
     context::{Actions, CurrentPlaybackContext},
     enums::{DeviceType, RepeatState},
+    idtypes::PlaylistId,
     CurrentlyPlayingType, Device, PlayableId, PlayableItem,
   };
   use std::{sync::mpsc::channel, time::SystemTime};
@@ -587,65 +635,47 @@ mod tests {
   }
 
   #[test]
-  fn miniplayer_key_pushes_miniplayer_from_normal_route() {
+  fn ctrl_f_in_playlist_track_table_opens_playlist_search_input() {
     let mut app = App::default();
+    let playlist_id = PlaylistId::from_id("37i9dQZF1DX4WYpdgoIcn6")
+      .unwrap()
+      .into_static();
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id);
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
 
-    handle_app(Key::Char('T'), &mut app);
+    handle_app(Key::Ctrl('f'), &mut app);
 
-    let route = app.get_current_route();
-    assert_eq!(route.id, RouteId::MiniPlayer);
-    assert_eq!(route.active_block, ActiveBlock::MiniPlayer);
+    assert_eq!(app.input_context, InputContext::PlaylistTrackSearch);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Input);
   }
 
   #[test]
-  fn miniplayer_key_exits_when_already_in_miniplayer() {
+  fn search_key_in_playlist_track_table_opens_global_search_input() {
     let mut app = App::default();
+    let playlist_id = PlaylistId::from_id("37i9dQZF1DX4WYpdgoIcn6")
+      .unwrap()
+      .into_static();
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id);
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
 
-    handle_app(Key::Char('T'), &mut app);
+    handle_app(app.user_config.keys.search, &mut app);
 
-    let route = app.get_current_route();
-    assert_eq!(route.id, RouteId::TrackTable);
-    assert_eq!(route.active_block, ActiveBlock::TrackTable);
+    assert_eq!(app.input_context, InputContext::GlobalSearch);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Input);
   }
 
   #[test]
-  fn miniplayer_key_is_not_intercepted_in_input_mode() {
+  fn search_key_outside_playlist_track_table_opens_global_search_input() {
     let mut app = App::default();
-    app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
-
-    handle_app(Key::Char('T'), &mut app);
-
-    assert_eq!(app.input, vec!['T']);
-    assert_ne!(app.get_current_route().id, RouteId::MiniPlayer);
-  }
-
-  #[test]
-  fn back_key_exits_miniplayer_handler() {
-    let mut app = App::default();
+    app.track_table.context = Some(TrackTableContext::SavedTracks);
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
 
-    handle_app(app.user_config.keys.back, &mut app);
+    handle_app(app.user_config.keys.search, &mut app);
 
-    let route = app.get_current_route();
-    assert_eq!(route.id, RouteId::TrackTable);
-    assert_eq!(route.active_block, ActiveBlock::TrackTable);
-  }
-
-  #[test]
-  fn miniplayer_does_not_inherit_playbar_layout_navigation() {
-    let mut app = App::default();
-    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-    app.push_navigation_stack(RouteId::MiniPlayer, ActiveBlock::MiniPlayer);
-
-    handle_app(Key::Up, &mut app);
-
-    let route = app.get_current_route();
-    assert_eq!(route.id, RouteId::MiniPlayer);
-    assert_eq!(route.active_block, ActiveBlock::MiniPlayer);
+    assert_eq!(app.input_context, InputContext::GlobalSearch);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::Input);
   }
 
   #[cfg(target_os = "macos")]

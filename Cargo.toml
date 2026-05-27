@@ -6,7 +6,7 @@ documentation = "https://github.com/LargeModGames/spotatui"
 repository = "https://github.com/LargeModGames/spotatui"
 keywords = ["spotify", "tui", "cli", "terminal"]
 categories = ["command-line-utilities"]
-version = "0.38.2"
+version = "0.38.4"
 authors = ["LargeModGames <LargeModGames@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -43,7 +43,7 @@ chrono = "0.4.44"
 log = "0.4.28"
 fern = "0.7.1"
 open = "5.3"
-self_update = { version = "0.44", features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"] }
+self_update = { version = "0.44", features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"], optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 openssl = { version = "0.10", optional = true }
 cpal = { version = "0.17", optional = true }
@@ -99,8 +99,9 @@ objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 
 [features]
-default = ["telemetry", "streaming", "audio-viz-cpal", "macos-media", "discord-rpc", "mpris"]
+default = ["telemetry", "streaming", "audio-viz-cpal", "macos-media", "discord-rpc", "mpris", "self-update"]
 telemetry = []
+self-update = ["dep:self_update"]
 streaming = ["librespot-core", "librespot-playback", "librespot-connect", "librespot-oauth", "librespot-metadata", "librespot-protocol", "protobuf"]
 # Audio backend features
 alsa-backend = ["streaming", "librespot-playback/alsa-backend"]

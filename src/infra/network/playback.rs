@@ -1,15 +1,22 @@
-use super::requests::spotify_get_typed_compat_for;
 use super::{IoEvent, Network};
+#[cfg(feature = "streaming")]
+use crate::core::app::NativePlaybackOrigin;
 use crate::tui::ui::util::create_artist_string;
 use anyhow::anyhow;
-use chrono::Duration as ChronoDuration;
 use chrono::TimeDelta;
+#[cfg(feature = "streaming")]
+use log::info;
+use reqwest::Method;
+#[cfg(feature = "streaming")]
+use rspotify::model::device::DevicePayload;
 use rspotify::model::{
+  context::CurrentUserQueue,
   enums::RepeatState,
   idtypes::{PlayContextId, PlayableId},
-  Offset, PlayableItem,
+  PlayableItem,
 };
 use rspotify::prelude::*;
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "streaming")]
@@ -71,15 +78,41 @@ fn trim_api_playback_uris(
   (trimmed_uris, Some(selected_index - start))
 }
 
-fn api_playback_offset(
+fn api_playback_offset_json(
   context_uris: Option<&[PlayableId<'static>]>,
   offset: Option<usize>,
-) -> Option<Offset> {
+) -> Option<Value> {
   if let Some(first_uri) = context_uris.and_then(|uris| uris.first()) {
-    return Some(Offset::Uri(first_uri.uri()));
+    return Some(json!({ "uri": first_uri.uri() }));
   }
 
-  offset.map(|index| Offset::Position(ChronoDuration::milliseconds(index as i64)))
+  offset.map(|index| json!({ "position": index }))
+}
+
+fn api_playback_body(
+  context_id: Option<&PlayContextId<'static>>,
+  uris: Option<&[PlayableId<'static>]>,
+  offset: Option<usize>,
+) -> Option<Value> {
+  match (context_id, uris) {
+    (Some(context), track_uris) => {
+      let mut body = json!({ "context_uri": context.uri() });
+      if let Some(offset) = api_playback_offset_json(track_uris, offset) {
+        body["offset"] = offset;
+      }
+      Some(body)
+    }
+    (None, Some(track_uris)) => {
+      let mut body = json!({
+        "uris": track_uris.iter().map(|uri| uri.uri()).collect::<Vec<_>>()
+      });
+      if let Some(offset) = api_playback_offset_json(None, offset) {
+        body["offset"] = offset;
+      }
+      Some(body)
+    }
+    (None, None) => None,
+  }
 }
 
 fn playable_item_id(item: &PlayableItem) -> Option<String> {
@@ -98,6 +131,13 @@ fn playable_item_name(item: &PlayableItem) -> Option<&str> {
   }
 }
 
+#[cfg(feature = "streaming")]
+#[derive(Debug, PartialEq, Eq)]
+enum NativePlaybackRoute {
+  ContextApi { device_id: String },
+  NativeLoad,
+}
+
 fn api_confirms_native_info_is_current(
   native_name: &str,
   item: &PlayableItem,
@@ -110,6 +150,30 @@ fn api_confirms_native_info_is_current(
   playable_item_id(item)
     .as_deref()
     .is_some_and(|api_id| Some(api_id) == last_track_id)
+}
+
+#[cfg(feature = "streaming")]
+#[derive(Clone, Copy, Debug)]
+struct StaleApiItemContext {
+  native_info_present: bool,
+  api_item_present: bool,
+  api_confirms_native_info: bool,
+  native_track_id_present: bool,
+  api_item_matches_native_track: bool,
+  native_streaming_was_active: bool,
+  native_activation_pending: bool,
+  api_device_is_native: bool,
+}
+
+#[cfg(feature = "streaming")]
+fn stale_api_item_should_preserve_native_context(context: StaleApiItemContext) -> bool {
+  context.api_item_present
+    && !context.api_confirms_native_info
+    && (context.native_info_present
+      || (context.native_track_id_present && !context.api_item_matches_native_track))
+    && (context.native_streaming_was_active
+      || context.native_activation_pending
+      || context.api_device_is_native)
 }
 
 /// Get the currently active streaming player, if any.
@@ -165,6 +229,53 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
   false
 }
 
+#[cfg(feature = "streaming")]
+async fn requested_native_playback_origin(
+  network: &Network,
+  context_id: &Option<PlayContextId<'static>>,
+  uris: &Option<Vec<PlayableId<'static>>>,
+) -> NativePlaybackOrigin {
+  if context_id.is_some() {
+    return NativePlaybackOrigin::Context;
+  }
+
+  if uris.is_some() {
+    return NativePlaybackOrigin::RawList;
+  }
+
+  let app = network.app.lock().await;
+  if let Some(origin) = app.native_playback_origin {
+    return origin;
+  }
+
+  if app
+    .current_playback_context
+    .as_ref()
+    .and_then(|ctx| ctx.context.as_ref())
+    .is_some()
+  {
+    NativePlaybackOrigin::Context
+  } else {
+    NativePlaybackOrigin::RawList
+  }
+}
+
+#[cfg(feature = "streaming")]
+async fn resolve_native_playback_route(
+  network: &Network,
+  context_id: &Option<PlayContextId<'static>>,
+) -> NativePlaybackRoute {
+  if context_id.is_none() {
+    return NativePlaybackRoute::NativeLoad;
+  }
+
+  let app = network.app.lock().await;
+  match app.native_device_id.clone() {
+    Some(device_id) => NativePlaybackRoute::ContextApi { device_id },
+    None => NativePlaybackRoute::NativeLoad,
+  }
+}
+
 impl PlaybackNetwork for Network {
   async fn get_current_playback(&mut self) {
     // When using native streaming, the Spotify API returns stale server-side state
@@ -193,12 +304,12 @@ impl PlaybackNetwork for Network {
         None
       };
 
-    let context = spotify_get_typed_compat_for::<Option<rspotify::model::CurrentPlaybackContext>>(
-      &self.spotify,
-      "me/player",
-      &[("additional_types", "episode,track".to_string())],
-    )
-    .await;
+    let context = self
+      .spotify_get_typed::<Option<rspotify::model::CurrentPlaybackContext>>(
+        "me/player",
+        &[("additional_types", "episode,track".to_string())],
+      )
+      .await;
 
     let mut app = self.app.lock().await;
 
@@ -226,7 +337,20 @@ impl PlaybackNetwork for Network {
           }
         }
 
+        #[cfg(feature = "streaming")]
+        let native_streaming_was_active = app.is_streaming_active;
+        #[cfg(feature = "streaming")]
+        let native_activation_was_pending = app.native_activation_pending;
         let native_track_id_before_api = app.last_track_id.clone();
+        #[cfg(feature = "streaming")]
+        let native_track_id_present = native_track_id_before_api.is_some();
+        #[cfg(feature = "streaming")]
+        let api_item_matches_native_track = c
+          .item
+          .as_ref()
+          .and_then(playable_item_id)
+          .as_deref()
+          .is_some_and(|api_id| Some(api_id) == native_track_id_before_api.as_deref());
         let api_item_confirms_native_info = app
           .native_track_info
           .as_ref()
@@ -238,6 +362,19 @@ impl PlaybackNetwork for Network {
               native_track_id_before_api.as_deref(),
             )
           });
+        #[cfg(feature = "streaming")]
+        let stale_api_item_for_native =
+          stale_api_item_should_preserve_native_context(StaleApiItemContext {
+            native_info_present: app.native_track_info.is_some(),
+            api_item_present: c.item.is_some(),
+            api_confirms_native_info: api_item_confirms_native_info,
+            native_track_id_present,
+            api_item_matches_native_track,
+            native_streaming_was_active,
+            native_activation_pending: native_activation_was_pending,
+            api_device_is_native: is_native_device,
+          });
+        #[cfg(not(feature = "streaming"))]
         let stale_api_item_for_native =
           app.native_track_info.is_some() && c.item.is_some() && !api_item_confirms_native_info;
 
@@ -321,35 +458,43 @@ impl PlaybackNetwork for Network {
           }
         }
 
-        // Get album/episode cover art
-        #[cfg(feature = "cover-art")]
-        if app
-          .user_config
-          .do_draw_cover_art(app.cover_art.full_image_support())
-        {
-          if let Some(playable) = &c.item {
-            let image = match playable {
-              PlayableItem::Track(t) => t.album.images.first(),
-              PlayableItem::Episode(e) => e.images.first(),
-              _ => None,
-            };
+        if !stale_api_item_for_native {
+          // Get album/episode cover art
+          #[cfg(feature = "cover-art")]
+          if app
+            .user_config
+            .do_draw_cover_art(app.cover_art.full_image_support())
+          {
+            if let Some(playable) = &c.item {
+              let image = match playable {
+                PlayableItem::Track(t) => t.album.images.first(),
+                PlayableItem::Episode(e) => e.images.first(),
+                _ => None,
+              };
 
-            if let Some(image) = image {
-              if let anyhow::Result::Err(err) = app.cover_art.refresh(image).await {
-                drop(app);
-                self.handle_error(err).await;
-                return;
+              if let Some(image) = image {
+                if let anyhow::Result::Err(err) = app.cover_art.refresh(image).await {
+                  drop(app);
+                  self.handle_error(err).await;
+                  return;
+                }
               }
             }
           }
-        }
 
-        app.current_playback_context = Some(c);
+          app.current_playback_context = Some(c);
+        }
 
         // Update is_streaming_active based on whether the current device matches native streaming
         #[cfg(feature = "streaming")]
         {
-          app.is_streaming_active = is_native_device;
+          if stale_api_item_for_native {
+            app.is_streaming_active = true;
+            app.native_activation_pending = false;
+          } else {
+            app.is_streaming_active = is_native_device;
+          }
+
           if is_native_device {
             app.native_activation_pending = false;
           }
@@ -359,7 +504,10 @@ impl PlaybackNetwork for Network {
         // Spotify's playback endpoint can lag behind librespot by several seconds
         // and report a different item; TrackChanged/Stopped events own this field.
         #[cfg(feature = "streaming")]
-        if app.native_track_info.is_some() && (!is_native_device || api_item_confirms_native_info) {
+        if app.native_track_info.is_some()
+          && !stale_api_item_for_native
+          && (!is_native_device || api_item_confirms_native_info)
+        {
           app.native_track_info = None;
         }
       }
@@ -466,6 +614,8 @@ impl PlaybackNetwork for Network {
     #[cfg(feature = "streaming")]
     if is_native_streaming_active_for_playback(self).await {
       if let Some(player) = current_streaming_player(self).await {
+        let requested_origin = requested_native_playback_origin(self, &context_id, &uris).await;
+        let native_route = resolve_native_playback_route(self, &context_id).await;
         let activation_time = Instant::now();
         let should_transfer = {
           let app = self.app.lock().await;
@@ -490,10 +640,12 @@ impl PlaybackNetwork for Network {
           app.is_streaming_active = true;
           app.last_device_activation = Some(activation_time);
           app.native_activation_pending = false;
+          app.native_playback_origin = Some(requested_origin);
         }
 
         // For resume playback (no context, no uris)
         if context_id.is_none() && uris.is_none() {
+          info!("starting native resume playback via direct player route");
           player.play();
           // Update UI state immediately
           let mut app = self.app.lock().await;
@@ -501,6 +653,60 @@ impl PlaybackNetwork for Network {
             ctx.is_playing = true;
           }
           return;
+        }
+
+        if let (NativePlaybackRoute::ContextApi { device_id }, Some(context)) =
+          (&native_route, context_id.clone())
+        {
+          info!(
+            "starting native playback via Spotify context route on device {}",
+            device_id
+          );
+          let body = api_playback_body(Some(&context), uris.as_deref(), offset);
+          match self
+            .spotify_api_request_json(
+              Method::PUT,
+              "me/player/play",
+              &[("device_id", device_id.clone())],
+              body,
+            )
+            .await
+          {
+            Ok(_) => {
+              if let Err(e) = self
+                .spotify_api_request_json(
+                  Method::PUT,
+                  "me/player/shuffle",
+                  &[
+                    ("state", desired_shuffle_state.to_string()),
+                    ("device_id", device_id.clone()),
+                  ],
+                  None,
+                )
+                .await
+              {
+                let mut app = self.app.lock().await;
+                app.handle_error(anyhow!(e));
+              }
+
+              let mut app = self.app.lock().await;
+              app.instant_since_last_current_playback_poll =
+                Instant::now() - Duration::from_secs(6);
+              if let Some(ctx) = &mut app.current_playback_context {
+                ctx.is_playing = true;
+                ctx.shuffle_state = desired_shuffle_state;
+              }
+              app.user_config.behavior.shuffle_enabled = desired_shuffle_state;
+              app.dispatch(IoEvent::GetCurrentPlayback);
+              return;
+            }
+            Err(e) => {
+              info!(
+                "native context playback via Spotify API failed; falling back to direct native load: {}",
+                e
+              );
+            }
+          }
         }
 
         // For URI-based or context playback, use Spirc load directly.
@@ -543,6 +749,7 @@ impl PlaybackNetwork for Network {
           }
         };
 
+        info!("starting native playback via direct load route");
         if let Err(e) = player.load(request) {
           let mut app = self.app.lock().await;
           app.handle_error(anyhow!("Failed to start native playback: {}", e));
@@ -560,37 +767,22 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    let result = match (context_id, uris) {
-      (Some(context), track_uris) => {
-        let offset_struct = api_playback_offset(track_uris.as_deref(), offset);
-        self
-          .spotify
-          .start_context_playback(
-            context,
-            None, // device_id
-            offset_struct,
-            None, // position
-          )
-          .await
-      }
-      (None, Some(track_uris)) => {
-        let offset_struct = api_playback_offset(None, offset);
-        self
-          .spotify
-          .start_uris_playback(
-            track_uris,
-            None, // device_id
-            offset_struct,
-            None, // position
-          )
-          .await
-      }
-      (None, None) => self.spotify.resume_playback(None, None).await,
-    };
+    let body = api_playback_body(context_id.as_ref(), uris.as_deref(), offset);
+    let result = self
+      .spotify_api_request_json(Method::PUT, "me/player/play", &[], body)
+      .await;
 
     match result {
       Ok(_) => {
-        if let Err(e) = self.spotify.shuffle(desired_shuffle_state, None).await {
+        if let Err(e) = self
+          .spotify_api_request_json(
+            Method::PUT,
+            "me/player/shuffle",
+            &[("state", desired_shuffle_state.to_string())],
+            None,
+          )
+          .await
+        {
           let mut app = self.app.lock().await;
           app.handle_error(anyhow!(e));
         }
@@ -624,7 +816,10 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    match self.spotify.pause_playback(None).await {
+    match self
+      .spotify_api_request_json(Method::PUT, "me/player/pause", &[], None)
+      .await
+    {
       Ok(_) => {
         let mut app = self.app.lock().await;
         if let Some(ctx) = &mut app.current_playback_context {
@@ -647,7 +842,10 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    if let Err(e) = self.spotify.next_track(None).await {
+    if let Err(e) = self
+      .spotify_api_request_json(Method::POST, "me/player/next", &[], None)
+      .await
+    {
       let mut app = self.app.lock().await;
       app.handle_error(anyhow!(e));
     }
@@ -662,7 +860,10 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    if let Err(e) = self.spotify.previous_track(None).await {
+    if let Err(e) = self
+      .spotify_api_request_json(Method::POST, "me/player/previous", &[], None)
+      .await
+    {
       let mut app = self.app.lock().await;
       app.handle_error(anyhow!(e));
     }
@@ -682,7 +883,10 @@ impl PlaybackNetwork for Network {
     // First previous_track restarts the current track (if past Spotify's ~3s
     // threshold). After a short delay the second call actually skips to the
     // previous track, since the position is now back at 0.
-    if let Err(e) = self.spotify.previous_track(None).await {
+    if let Err(e) = self
+      .spotify_api_request_json(Method::POST, "me/player/previous", &[], None)
+      .await
+    {
       let mut app = self.app.lock().await;
       app.handle_error(anyhow!(e));
       return;
@@ -690,7 +894,10 @@ impl PlaybackNetwork for Network {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    if let Err(e) = self.spotify.previous_track(None).await {
+    if let Err(e) = self
+      .spotify_api_request_json(Method::POST, "me/player/previous", &[], None)
+      .await
+    {
       let mut app = self.app.lock().await;
       app.handle_error(anyhow!(e));
     }
@@ -706,8 +913,12 @@ impl PlaybackNetwork for Network {
     }
 
     if let Err(e) = self
-      .spotify
-      .seek_track(ChronoDuration::milliseconds(position_ms as i64), None)
+      .spotify_api_request_json(
+        Method::PUT,
+        "me/player/seek",
+        &[("position_ms", position_ms.to_string())],
+        None,
+      )
       .await
     {
       let mut app = self.app.lock().await;
@@ -728,7 +939,15 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    match self.spotify.shuffle(shuffle_state, None).await {
+    match self
+      .spotify_api_request_json(
+        Method::PUT,
+        "me/player/shuffle",
+        &[("state", shuffle_state.to_string())],
+        None,
+      )
+      .await
+    {
       Ok(_) => {
         let mut app = self.app.lock().await;
         if let Some(ctx) = &mut app.current_playback_context {
@@ -755,7 +974,16 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    match self.spotify.repeat(repeat_state, None).await {
+    let repeat_state_param: &'static str = repeat_state.into();
+    match self
+      .spotify_api_request_json(
+        Method::PUT,
+        "me/player/repeat",
+        &[("state", repeat_state_param.to_string())],
+        None,
+      )
+      .await
+    {
       Ok(_) => {
         let mut app = self.app.lock().await;
         if let Some(ctx) = &mut app.current_playback_context {
@@ -794,7 +1022,15 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    match self.spotify.volume(volume, None).await {
+    match self
+      .spotify_api_request_json(
+        Method::PUT,
+        "me/player/volume",
+        &[("volume_percent", volume.to_string())],
+        None,
+      )
+      .await
+    {
       Ok(_) => {
         let mut app = self.app.lock().await;
         if let Some(ctx) = &mut app.current_playback_context {
@@ -839,6 +1075,7 @@ impl PlaybackNetwork for Network {
           let mut app = self.app.lock().await;
           app.is_streaming_active = true;
           app.native_activation_pending = true;
+          app.native_playback_origin = None;
           app.last_device_activation = Some(Instant::now());
           app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_secs(6);
           return;
@@ -846,7 +1083,18 @@ impl PlaybackNetwork for Network {
       }
     }
 
-    if let Err(e) = self.spotify.transfer_playback(&device_id, Some(true)).await {
+    if let Err(e) = self
+      .spotify_api_request_json(
+        Method::PUT,
+        "me/player",
+        &[],
+        Some(json!({
+          "device_ids": [device_id.clone()],
+          "play": true
+        })),
+      )
+      .await
+    {
       let mut app = self.app.lock().await;
       app.handle_error(anyhow!(e));
     } else {
@@ -863,6 +1111,7 @@ impl PlaybackNetwork for Network {
       {
         // If transferring away from native, update flag
         app.is_streaming_active = false;
+        app.native_playback_origin = None;
       }
     }
   }
@@ -907,9 +1156,13 @@ impl PlaybackNetwork for Network {
           tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        match self.spotify.device().await {
-          Ok(devices) => {
-            if let Some(device) = devices
+        match self
+          .spotify_get_typed::<DevicePayload>("me/player/devices", &[])
+          .await
+        {
+          Ok(payload) => {
+            if let Some(device) = payload
+              .devices
               .iter()
               .find(|d| d.name.to_lowercase() == device_name.to_lowercase())
             {
@@ -937,12 +1190,9 @@ impl PlaybackNetwork for Network {
     }
 
     // Check if we are paused/stopped
-    let context = spotify_get_typed_compat_for::<Option<rspotify::model::CurrentPlaybackContext>>(
-      &self.spotify,
-      "me/player",
-      &[],
-    )
-    .await;
+    let context = self
+      .spotify_get_typed::<Option<rspotify::model::CurrentPlaybackContext>>("me/player", &[])
+      .await;
 
     if let Ok(Some(ctx)) = context {
       if !ctx.is_playing {
@@ -971,7 +1221,15 @@ impl PlaybackNetwork for Network {
   }
 
   async fn add_item_to_queue(&mut self, item: PlayableId<'static>) {
-    match self.spotify.add_item_to_queue(item, None).await {
+    match self
+      .spotify_api_request_json(
+        Method::POST,
+        "me/player/queue",
+        &[("uri", item.uri())],
+        None,
+      )
+      .await
+    {
       Ok(_) => {
         let mut app = self.app.lock().await;
         app.status_message = Some("Added to queue".to_string());
@@ -985,7 +1243,10 @@ impl PlaybackNetwork for Network {
   }
 
   async fn get_queue(&mut self) {
-    match self.spotify.current_user_queue().await {
+    match self
+      .spotify_get_typed::<CurrentUserQueue>("me/player/queue", &[])
+      .await
+    {
       Ok(q) => {
         let mut app = self.app.lock().await;
         app.queue = Some(q);
@@ -1091,34 +1352,26 @@ mod tests {
       playable_track("0000000000000000000002"),
     ];
 
-    let offset = api_playback_offset(Some(&uris), Some(1));
+    let offset = api_playback_offset_json(Some(&uris), Some(1));
 
     assert_eq!(
       offset,
-      Some(Offset::Uri(
-        "spotify:track:0000000000000000000001".to_string()
-      ))
+      Some(json!({ "uri": "spotify:track:0000000000000000000001" }))
     );
   }
 
   #[test]
   fn api_playback_offset_uses_position_for_uri_list_playback() {
-    let offset = api_playback_offset(None, Some(1));
+    let offset = api_playback_offset_json(None, Some(1));
 
-    assert_eq!(
-      offset,
-      Some(Offset::Position(ChronoDuration::milliseconds(1)))
-    );
+    assert_eq!(offset, Some(json!({ "position": 1 })));
   }
 
   #[test]
   fn api_playback_offset_falls_back_to_position_when_context_has_no_uri() {
-    let offset = api_playback_offset(None, Some(3));
+    let offset = api_playback_offset_json(None, Some(3));
 
-    assert_eq!(
-      offset,
-      Some(Offset::Position(ChronoDuration::milliseconds(3)))
-    );
+    assert_eq!(offset, Some(json!({ "position": 3 })));
   }
 
   #[test]
@@ -1151,6 +1404,125 @@ mod tests {
       "New Native Song",
       &item,
       Some("0000000000000000000002")
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn stale_api_item_keeps_native_metadata_when_native_was_active() {
+    assert!(stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn stale_api_item_keeps_native_metadata_during_activation() {
+    assert!(stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: false,
+        native_activation_pending: true,
+        api_device_is_native: false,
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn stale_api_item_keeps_native_context_before_native_metadata_arrives() {
+    assert!(stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: false,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn stale_native_metadata_clears_after_playback_leaves_native_device() {
+    assert!(!stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: false,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn confirmed_api_item_no_longer_keeps_native_metadata() {
+    assert!(!stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: true,
+        native_track_id_present: true,
+        api_item_matches_native_track: true,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: true,
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn matching_api_item_without_native_metadata_can_update_context() {
+    assert!(!stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: false,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: true,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn api_item_without_native_track_id_can_update_context() {
+    assert!(!stale_api_item_should_preserve_native_context(
+      StaleApiItemContext {
+        native_info_present: false,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: false,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
     ));
   }
 }
