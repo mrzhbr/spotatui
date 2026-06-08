@@ -201,6 +201,8 @@ spotatui can play audio directly without needing spotifyd or the official Spotif
 
 See the [Native Streaming Wiki](https://github.com/LargeModGames/spotatui/wiki/Native-Streaming) for setup details.
 
+Sonos S1/S2 speakers on the same local network are discovered through SSDP/UPnP and shown in the device picker (`d`) alongside Spotify Connect devices. Selecting a Sonos room persists it as the playback target, initializes spotatui volume from the speaker, shows Sonos now-playing details in the playbar, and routes play/pause/skip/seek/volume plus queue-add commands through local Sonos control. Sonos shuffle/repeat changes, queue viewing, and OS media-key control are not supported yet.
+
 ## Configuration
 
 A configuration file is located at `${HOME}/.config/spotatui/config.yml`.
@@ -229,11 +231,12 @@ You can also override via `SPOTATUI_DISCORD_APP_ID` or disable in the setting or
 
 ## Limitations
 
-This app uses the [Web API](https://developer.spotify.com/documentation/web-api/) from Spotify, which doesn't handle streaming itself. You have three options for audio playback:
+This app uses the [Web API](https://developer.spotify.com/documentation/web-api/) from Spotify, which doesn't handle streaming itself. You have four options for audio playback:
 
 1. **Native Streaming (NEW!)** - spotatui can now play audio directly using its built-in streaming feature. See [Native Streaming](#native-streaming) below.
 2. **Official Spotify Client** - Have the official Spotify app open on your computer
 3. **Spotifyd** - Use a lightweight alternative like [spotifyd](https://github.com/Spotifyd/spotifyd)
+4. **Sonos S1/S2** - Use local Sonos speakers discovered on the same network from the device picker
 
 If you want to play tracks, Spotify requires that you have a Premium account.
 

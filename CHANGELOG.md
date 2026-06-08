@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Sonos playback devices**: Added local SSDP/UPnP discovery and control for Sonos S1/S2 rooms so speakers appear in the device picker and can be selected for playback, transport controls, seek, volume, queue-add flows, speaker-volume initialization, and Sonos now-playing display in the playbar ([#251](https://github.com/LargeModGames/spotatui/issues/251)).
+
 ## [v0.38.6] 2026-05-28
 
 ### Fixed
