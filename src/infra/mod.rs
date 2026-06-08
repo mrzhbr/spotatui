@@ -11,3 +11,4 @@ pub mod network;
 #[cfg(feature = "streaming")]
 pub mod player;
 pub mod redirect_uri;
+pub mod sonos;
