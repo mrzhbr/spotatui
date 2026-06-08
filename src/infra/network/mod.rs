@@ -93,6 +93,7 @@ pub enum IoEvent {
   UserArtistFollowCheck(Vec<ArtistId<'static>>),
   GetAlbum(AlbumId<'static>),
   TransferPlaybackToDevice(String, bool),
+  TransferPlaybackToSonosRoom(String, bool),
   #[allow(dead_code)]
   AutoSelectStreamingDevice(String, bool), // Auto-select a device by name (used for native streaming)
   GetAlbumForTrack(TrackId<'static>),
@@ -340,6 +341,11 @@ impl Network {
       IoEvent::TransferPlaybackToDevice(device_id, persist_device_id) => {
         self
           .transfert_playback_to_device(device_id, persist_device_id)
+          .await;
+      }
+      IoEvent::TransferPlaybackToSonosRoom(room_uuid, persist_device_id) => {
+        self
+          .transfer_playback_to_sonos_room(room_uuid, persist_device_id)
           .await;
       }
       #[cfg(feature = "streaming")]

@@ -1,3 +1,4 @@
+use crate::core::playback_target::{sonos_persisted_id, PlaybackTarget};
 use crate::core::user_config::UserConfig;
 use crate::infra::network::{IoEvent, Network};
 
@@ -54,7 +55,27 @@ impl CliApp {
 
   // spt playback -t
   pub async fn toggle_playback(&mut self) {
-    let context = self.net.app.lock().await.current_playback_context.clone();
+    let (context, sonos_selected, sonos_is_playing) = {
+      let app = self.net.app.lock().await;
+      (
+        app.current_playback_context.clone(),
+        app.selected_sonos_room_uuid.is_some(),
+        app.sonos_is_playing.unwrap_or(false),
+      )
+    };
+
+    if sonos_selected {
+      if sonos_is_playing {
+        self.net.handle_network_event(IoEvent::PausePlayback).await;
+      } else {
+        self
+          .net
+          .handle_network_event(IoEvent::StartPlayback(None, None, None))
+          .await;
+      }
+      return;
+    }
+
     if let Some(c) = context {
       if c.is_playing {
         self.net.handle_network_event(IoEvent::PausePlayback).await;
@@ -129,25 +150,42 @@ impl CliApp {
   pub async fn set_device(&mut self, name: String) -> Result<()> {
     // Change the device if specified by user
     let mut app = self.net.app.lock().await;
-    let mut device_index = 0;
-    if let Some(dp) = &app.devices {
-      for (i, d) in dp.devices.iter().enumerate() {
-        if d.name == name {
-          device_index = i;
-          // Save the id of the device
-          if let Some(id) = d.id.clone() {
-            self
-              .net
-              .client_config
-              .set_device_id(id)
-              .map_err(|_e| anyhow!("failed to use device with name '{}'", d.name))?;
-          }
-        }
-      }
-    } else {
-      // Error out if no device is available
+    let targets = app.playback_targets();
+    if targets.is_empty() {
       return Err(anyhow!("no device available"));
     }
+
+    let mut device_index = 0;
+    for (i, target) in targets.into_iter().enumerate() {
+      match target {
+        PlaybackTarget::Spotify {
+          id,
+          name: device_name,
+          ..
+        } if device_name == name => {
+          device_index = i;
+          self
+            .net
+            .client_config
+            .set_device_id(id)
+            .map_err(|_e| anyhow!("failed to use device with name '{}'", device_name))?;
+          app.selected_sonos_room_uuid = None;
+        }
+        PlaybackTarget::Sonos { room, .. } if room.name == name => {
+          device_index = i;
+          self
+            .net
+            .client_config
+            .set_device_id(sonos_persisted_id(&room.uuid))
+            .map_err(|_e| anyhow!("failed to use Sonos room '{}'", room.name))?;
+          app.selected_sonos_room_uuid = Some(room.uuid);
+          app.sonos_is_playing = Some(false);
+          app.current_playback_context = None;
+        }
+        _ => {}
+      }
+    }
+
     app.selected_device_index = Some(device_index);
     Ok(())
   }
@@ -199,23 +237,46 @@ impl CliApp {
   pub async fn list(&mut self, item: Type, format: &str) -> String {
     match item {
       Type::Device => {
-        if let Some(devices) = &self.net.app.lock().await.devices {
-          devices
-            .devices
-            .iter()
-            .map(|d| {
-              self.format_output(
+        let app = self.net.app.lock().await;
+        let targets = app.playback_targets();
+        if targets.is_empty() {
+          "No devices available".to_string()
+        } else {
+          targets
+            .into_iter()
+            .map(|target| match target {
+              PlaybackTarget::Spotify { name, .. } => {
+                let volume = app
+                  .devices
+                  .as_ref()
+                  .and_then(|devices| {
+                    devices
+                      .devices
+                      .iter()
+                      .find(|device| device.name == name)
+                      .and_then(|device| device.volume_percent)
+                  })
+                  .unwrap_or(0);
+                self.format_output(
+                  format.to_string(),
+                  vec![Format::Device(name), Format::Volume(volume)],
+                )
+              }
+              PlaybackTarget::Sonos { room, .. } => self.format_output(
                 format.to_string(),
                 vec![
-                  Format::Device(d.name.clone()),
-                  Format::Volume(d.volume_percent.unwrap_or(0)),
+                  Format::Device(room.name),
+                  Format::Volume(
+                    app
+                      .sonos_volume
+                      .unwrap_or(app.user_config.behavior.volume_percent)
+                      .into(),
+                  ),
                 ],
-              )
+              ),
             })
             .collect::<Vec<String>>()
             .join("\n")
-        } else {
-          "No devices available".to_string()
         }
       }
       Type::Playlist => {
@@ -270,28 +331,28 @@ impl CliApp {
 
   // spt playback --transfer DEVICE
   pub async fn transfer_playback(&mut self, device: &str) -> Result<()> {
-    // Get the device id by name
-    let mut id = String::new();
-    if let Some(devices) = &self.net.app.lock().await.devices {
-      for d in &devices.devices {
-        if d.name == device {
-          if let Some(device_id) = &d.id {
-            id.push_str(device_id);
-            break;
+    let id = {
+      let app = self.net.app.lock().await;
+      app
+        .playback_targets()
+        .into_iter()
+        .find_map(|target| match target {
+          PlaybackTarget::Spotify { id, name, .. } if name == device => Some(id),
+          PlaybackTarget::Sonos { room, .. } if room.name == device => {
+            Some(sonos_persisted_id(&room.uuid))
           }
-          break;
-        }
-      }
+          _ => None,
+        })
     };
 
-    if id.is_empty() {
-      Err(anyhow!("no device with name '{}'", device))
-    } else {
+    if let Some(id) = id {
       self
         .net
-        .handle_network_event(IoEvent::TransferPlaybackToDevice(id.to_string(), true))
+        .handle_network_event(IoEvent::TransferPlaybackToDevice(id, true))
         .await;
       Ok(())
+    } else {
+      Err(anyhow!("no device with name '{}'", device))
     }
   }
 
@@ -319,7 +380,18 @@ impl CliApp {
           _ => return Err(anyhow!("unknown playable item type")),
         };
 
-        (ms.num_milliseconds() as u32, duration)
+        (ms.num_milliseconds() as u32, Some(duration))
+      } else if app.selected_sonos_room_uuid.is_some() {
+        let current_pos = app
+          .sonos_now_playing
+          .as_ref()
+          .map(|now_playing| now_playing.position_ms)
+          .unwrap_or(app.song_progress_ms as u32);
+        let duration = app
+          .sonos_now_playing
+          .as_ref()
+          .and_then(|now_playing| now_playing.duration_ms);
+        (current_pos, duration)
       } else {
         return Err(anyhow!("no context available"));
       }
@@ -341,7 +413,7 @@ impl CliApp {
     };
 
     // Check if position_to_seek is greater than duration (next track)
-    if position_to_seek > duration {
+    if duration.is_some_and(|duration| position_to_seek > duration) {
       self.jump(&JumpDirection::Next).await;
     } else {
       // This seeks to a position in the current song
@@ -426,14 +498,27 @@ impl CliApp {
       .handle_network_event(IoEvent::GetCurrentSavedTracks(None))
       .await;
 
-    let context = self
-      .net
-      .app
-      .lock()
-      .await
-      .current_playback_context
-      .clone()
-      .ok_or_else(|| anyhow!("no context available"))?;
+    let context = {
+      let app = self.net.app.lock().await;
+      if let Some(context) = app.current_playback_context.clone() {
+        context
+      } else if let Some(room_uuid) = &app.selected_sonos_room_uuid {
+        let room_name = app
+          .sonos_rooms
+          .iter()
+          .find(|room| &room.uuid == room_uuid)
+          .map(|room| room.name.as_str())
+          .unwrap_or("selected room");
+        let state = if app.sonos_is_playing.unwrap_or(false) {
+          "playing"
+        } else {
+          "paused"
+        };
+        return Ok(format!("Sonos: {room_name} ({state})"));
+      } else {
+        return Err(anyhow!("no context available"));
+      }
+    };
 
     let playing_item = context.item.ok_or_else(|| anyhow!("no track playing"))?;
 

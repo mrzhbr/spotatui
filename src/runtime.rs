@@ -244,7 +244,12 @@ fn startup_device_decision(
 
   let event = match saved_device_id {
     Some(saved_device_id) => {
-      if let Some(devices) = devices_snapshot {
+      if crate::core::playback_target::parse_sonos_persisted_id(&saved_device_id).is_some() {
+        Some(StartupDeviceEvent::Transfer {
+          device_id: saved_device_id,
+          persist_device_id: true,
+        })
+      } else if let Some(devices) = devices_snapshot {
         let mut saved_device_available = false;
         let mut native_device_id = None;
 
@@ -1070,38 +1075,54 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
       #[cfg(not(feature = "streaming"))]
       let mut network = Network::new(spotify, client_config, &app, final_token_cache_path);
 
+      // Restore a saved Sonos room directly. This must not depend on native
+      // streaming or StartupBehavior::Play; otherwise a persisted Sonos target
+      // would be ignored on the default passive Continue startup and later
+      // playback commands could fall through to Spotify/native routing.
+      let saved_sonos_device_id = network.client_config.device_id.clone().filter(|device_id| {
+        crate::core::playback_target::parse_sonos_persisted_id(device_id).is_some()
+      });
+
+      if let Some(device_id) = saved_sonos_device_id.clone() {
+        network
+          .handle_network_event(IoEvent::TransferPlaybackToDevice(device_id, true))
+          .await;
+      }
+
       // Auto-select the saved playback device when available (fallback to native streaming).
       #[cfg(feature = "streaming")]
-      if let Some(device_name) = streaming_device_name {
-        let saved_device_id = network.client_config.device_id.clone();
-        let mut devices_snapshot = None;
+      if saved_sonos_device_id.is_none() {
+        if let Some(device_name) = streaming_device_name {
+          let saved_device_id = network.client_config.device_id.clone();
+          let mut devices_snapshot = None;
 
-        if let Ok(devices) = network
-          .spotify_get_typed::<rspotify::model::device::DevicePayload>("me/player/devices", &[])
-          .await
-        {
-          let devices_vec = devices.devices;
-          let mut app = network.app.lock().await;
-          app.devices = Some(rspotify::model::device::DevicePayload {
-            devices: devices_vec.clone(),
-          });
-          devices_snapshot = Some(devices_vec);
-        }
+          if let Ok(devices) = network
+            .spotify_get_typed::<rspotify::model::device::DevicePayload>("me/player/devices", &[])
+            .await
+          {
+            let devices_vec = devices.devices;
+            let mut app = network.app.lock().await;
+            app.devices = Some(rspotify::model::device::DevicePayload {
+              devices: devices_vec.clone(),
+            });
+            devices_snapshot = Some(devices_vec);
+          }
 
-        let startup_decision = startup_device_decision(
-          initial_startup_behavior,
-          saved_device_id,
-          devices_snapshot.as_deref(),
-          &device_name,
-        );
+          let startup_decision = startup_device_decision(
+            initial_startup_behavior,
+            saved_device_id,
+            devices_snapshot.as_deref(),
+            &device_name,
+          );
 
-        if let Some(message) = startup_decision.status_message {
-          let mut app = network.app.lock().await;
-          app.set_status_message(message, 5);
-        }
+          if let Some(message) = startup_decision.status_message {
+            let mut app = network.app.lock().await;
+            app.set_status_message(message, 5);
+          }
 
-        if let Some(event) = startup_decision.event {
-          network.handle_network_event(event.into_io_event()).await;
+          if let Some(event) = startup_decision.event {
+            network.handle_network_event(event.into_io_event()).await;
+          }
         }
       }
 
@@ -1498,6 +1519,24 @@ mod tests {
       ),
       Some(StartupDeviceEvent::Transfer {
         device_id: EXTERNAL_ID.to_string(),
+        persist_device_id: true,
+      })
+    );
+  }
+
+  #[test]
+  fn play_with_saved_sonos_device_transfers_without_native_fallback() {
+    let devices = vec![device(NATIVE_ID, NATIVE_NAME)];
+    let sonos_id = "sonos:RINCON_123".to_string();
+
+    assert_eq!(
+      startup_device_event(
+        StartupBehavior::Play,
+        Some(sonos_id.clone()),
+        Some(&devices)
+      ),
+      Some(StartupDeviceEvent::Transfer {
+        device_id: sonos_id,
         persist_device_id: true,
       })
     );

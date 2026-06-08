@@ -1,3 +1,4 @@
+use crate::core::playback_target::{parse_sonos_persisted_id, sonos_persisted_id};
 use crate::core::user_config::UserConfig;
 use crate::infra::network::{IoEvent, Network};
 
@@ -17,37 +18,78 @@ pub async fn handle_matches(
   config: UserConfig,
 ) -> Result<String> {
   let mut cli = CliApp::new(net, config);
+  let playback_command = matches!(cmd.as_str(), "playback" | "play");
+  let should_load_devices = matches.get_one::<String>("device").is_some()
+    || (cmd == "playback" && matches.get_one::<String>("transfer").is_some())
+    || (cmd == "list" && matches.get_flag("devices"))
+    || (playback_command && cli.net.client_config.device_id.is_none());
 
-  cli.net.handle_network_event(IoEvent::GetDevices).await;
-  cli
-    .net
-    .handle_network_event(IoEvent::GetCurrentPlayback)
-    .await;
+  if should_load_devices {
+    cli.net.handle_network_event(IoEvent::GetDevices).await;
 
-  let devices_list = match &cli.net.app.lock().await.devices {
-    Some(p) => p
-      .devices
-      .iter()
-      .filter_map(|d| d.id.clone())
-      .collect::<Vec<String>>(),
-    None => Vec::new(),
-  };
+    let devices_list = {
+      let app = cli.net.app.lock().await;
+      let mut devices = app
+        .devices
+        .as_ref()
+        .map(|p| {
+          p.devices
+            .iter()
+            .filter_map(|d| d.id.clone())
+            .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+      devices.extend(
+        app
+          .sonos_rooms
+          .iter()
+          .map(|room| sonos_persisted_id(&room.uuid)),
+      );
+      devices
+    };
 
-  // If the device_id is not specified, select the first available device
-  let device_id = cli.net.client_config.device_id.clone();
-  let needs_device = match &device_id {
-    Some(id) => !devices_list.contains(id),
-    None => true,
-  };
-  if needs_device {
-    // Select the first device available
-    if let Some(d) = devices_list.first() {
-      cli.net.client_config.set_device_id(d.clone())?;
+    // If the device_id is not specified, select the first available Spotify device.
+    // A saved Sonos room may be temporarily undiscoverable; keep it selected so CLI
+    // playback commands do not silently overwrite it and route to Spotify instead.
+    let device_id = cli.net.client_config.device_id.clone();
+    let needs_device = match &device_id {
+      Some(id) if parse_sonos_persisted_id(id).is_some() => false,
+      Some(id) => !devices_list.contains(id),
+      None => playback_command,
+    };
+    if needs_device {
+      if let Some(d) = devices_list
+        .iter()
+        .find(|device_id| parse_sonos_persisted_id(device_id).is_none())
+        .or_else(|| devices_list.first())
+      {
+        cli.net.client_config.set_device_id(d.clone())?;
+      }
+    }
+
+    if let Some(d) = matches.get_one::<String>("device") {
+      cli.set_device(d.to_string()).await?;
     }
   }
 
-  if let Some(d) = matches.get_one::<String>("device") {
-    cli.set_device(d.to_string()).await?;
+  if playback_command {
+    if let Some(device_id) = cli
+      .net
+      .client_config
+      .device_id
+      .clone()
+      .filter(|device_id| parse_sonos_persisted_id(device_id).is_some())
+    {
+      cli
+        .net
+        .handle_network_event(IoEvent::TransferPlaybackToDevice(device_id, true))
+        .await;
+    }
+
+    cli
+      .net
+      .handle_network_event(IoEvent::GetCurrentPlayback)
+      .await;
   }
 
   // Evalute the subcommand
