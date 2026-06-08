@@ -1,3 +1,6 @@
+use crate::core::playback_target::{
+  spotify_target_from_device, PlaybackTarget, SonosNowPlaying, SonosRoom,
+};
 use crate::core::sort::{SortContext, SortField, SortOrder, SortState};
 use crate::core::user_config::{color_to_string, normalize_tick_rate_milliseconds, UserConfig};
 use crate::infra::network::sync::{PartySession, PartyStatus};
@@ -747,6 +750,11 @@ pub struct App {
   #[allow(dead_code)]
   pub pending_stop_after_track: bool,
   pub devices: Option<DevicePayload>,
+  pub sonos_rooms: Vec<SonosRoom>,
+  pub selected_sonos_room_uuid: Option<String>,
+  pub sonos_volume: Option<u8>,
+  pub sonos_is_playing: Option<bool>,
+  pub sonos_now_playing: Option<SonosNowPlaying>,
   pub queue: Option<CurrentUserQueue>,
   pub queue_selected_index: usize,
   #[cfg(feature = "cover-art")]
@@ -1029,6 +1037,11 @@ impl Default for App {
       last_track_id: None,
       pending_stop_after_track: false,
       devices: None,
+      sonos_rooms: Vec::new(),
+      selected_sonos_room_uuid: None,
+      sonos_volume: None,
+      sonos_is_playing: None,
+      sonos_now_playing: None,
       queue: None,
       queue_selected_index: 0,
       input: vec![],
@@ -1208,6 +1221,33 @@ impl App {
         // TODO: handle error
       };
     }
+  }
+
+  pub fn playback_targets(&self) -> Vec<PlaybackTarget> {
+    let mut targets = self
+      .devices
+      .as_ref()
+      .map(|payload| {
+        payload
+          .devices
+          .iter()
+          .filter_map(spotify_target_from_device)
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
+
+    targets.extend(
+      self
+        .sonos_rooms
+        .iter()
+        .cloned()
+        .map(|room| PlaybackTarget::Sonos {
+          is_selected: self.selected_sonos_room_uuid.as_ref() == Some(&room.uuid),
+          room,
+        }),
+    );
+
+    targets
   }
 
   #[allow(dead_code)]
@@ -1506,6 +1546,20 @@ impl App {
   }
 
   fn apply_seek(&mut self, seek_ms: u32) {
+    if self.selected_sonos_room_uuid.is_some() && self.current_playback_context.is_none() {
+      if self
+        .sonos_now_playing
+        .as_ref()
+        .and_then(|now_playing| now_playing.duration_ms)
+        .is_some_and(|duration_ms| seek_ms >= duration_ms)
+      {
+        self.dispatch(IoEvent::NextTrack);
+      } else {
+        self.dispatch(IoEvent::Seek(seek_ms));
+      }
+      return;
+    }
+
     if let Some(CurrentPlaybackContext {
       item: Some(item), ..
     }) = &self.current_playback_context
@@ -1592,7 +1646,8 @@ impl App {
     self.poll_current_playback();
     let playing_now = self.user_config.behavior.keepawake_enabled
       && self
-        .native_is_playing
+        .sonos_is_playing
+        .or(self.native_is_playing)
         .or_else(|| self.current_playback_context.as_ref().map(|c| c.is_playing))
         .unwrap_or(false);
     match (playing_now, self.keepawake.is_some()) {
@@ -1608,6 +1663,37 @@ impl App {
       }
       (false, true) => self.keepawake = None,
       _ => {}
+    }
+
+    if let Some(selected_uuid) = self.selected_sonos_room_uuid.as_deref() {
+      if let Some(now_playing) = self.sonos_now_playing.as_ref().filter(|now_playing| {
+        now_playing.is_for_room(selected_uuid) && now_playing.is_fresh(Duration::from_secs(10))
+      }) {
+        let recently_seeked = self
+          .last_api_seek
+          .is_some_and(|t| t.elapsed().as_millis() < SEEK_POSITION_IGNORE_MS);
+
+        if recently_seeked {
+          return;
+        }
+
+        let ms_since_poll = self
+          .instant_since_last_current_playback_poll
+          .elapsed()
+          .as_millis();
+
+        if ms_since_poll < 300 {
+          self.song_progress_ms = now_playing.position_ms as u128;
+        } else if now_playing.is_playing {
+          let elapsed_ms = elapsed.as_millis();
+          let next_progress = self.song_progress_ms + elapsed_ms;
+          self.song_progress_ms = now_playing
+            .duration_ms
+            .map(|duration_ms| next_progress.min(duration_ms as u128))
+            .unwrap_or(next_progress);
+        }
+        return;
+      }
     }
 
     if let Some(CurrentPlaybackContext {
@@ -1670,6 +1756,22 @@ impl App {
       "seeking forwards by {} ms",
       self.user_config.behavior.seek_milliseconds
     );
+    if self.selected_sonos_room_uuid.is_some() && self.current_playback_context.is_none() {
+      let old_progress = self.seek_ms.unwrap_or(self.song_progress_ms);
+      let new_progress = old_progress as u32 + self.user_config.behavior.seek_milliseconds;
+      if self
+        .sonos_now_playing
+        .as_ref()
+        .and_then(|now_playing| now_playing.duration_ms)
+        .is_some_and(|duration_ms| new_progress >= duration_ms)
+      {
+        self.dispatch(IoEvent::NextTrack);
+      } else {
+        self.queue_api_seek(new_progress);
+      }
+      return;
+    }
+
     if let Some(CurrentPlaybackContext {
       item: Some(item), ..
     }) = &self.current_playback_context
@@ -1909,6 +2011,11 @@ impl App {
     if let Some(pending) = self.pending_volume {
       return pending as u32;
     }
+    if self.selected_sonos_room_uuid.is_some() {
+      return self
+        .sonos_volume
+        .unwrap_or(self.user_config.behavior.volume_percent) as u32;
+    }
     self
       .current_playback_context
       .as_ref()
@@ -1927,6 +2034,16 @@ impl App {
 
     if next_volume != current_volume {
       info!("increasing volume: {} -> {}", current_volume, next_volume);
+      if self.selected_sonos_room_uuid.is_some() {
+        self.sonos_volume = Some(next_volume);
+        self.pending_volume = Some(next_volume);
+        if !self.is_volume_change_in_flight {
+          self.is_volume_change_in_flight = true;
+          self.dispatch(IoEvent::ChangeVolume(next_volume));
+        }
+        return;
+      }
+
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]
       if self.is_native_streaming_active_for_playback() {
@@ -1969,6 +2086,16 @@ impl App {
         "decreasing volume: {} -> {}",
         current_volume, next_volume_u8
       );
+
+      if self.selected_sonos_room_uuid.is_some() {
+        self.sonos_volume = Some(next_volume_u8);
+        self.pending_volume = Some(next_volume_u8);
+        if !self.is_volume_change_in_flight {
+          self.is_volume_change_in_flight = true;
+          self.dispatch(IoEvent::ChangeVolume(next_volume_u8));
+        }
+        return;
+      }
 
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]
@@ -2051,6 +2178,25 @@ impl App {
   }
 
   pub fn toggle_playback(&mut self) {
+    if self.selected_sonos_room_uuid.is_some() {
+      let is_playing = self
+        .sonos_is_playing
+        .or_else(|| self.current_playback_context.as_ref().map(|c| c.is_playing))
+        .unwrap_or(false);
+      info!(
+        "toggling Sonos playback: {}",
+        if is_playing { "paused" } else { "playing" }
+      );
+      if is_playing {
+        self.sonos_is_playing = Some(false);
+        self.dispatch(IoEvent::PausePlayback);
+      } else {
+        self.sonos_is_playing = Some(true);
+        self.dispatch(IoEvent::StartPlayback(None, None, None));
+      }
+      return;
+    }
+
     // Use native streaming player for instant control (bypasses event channel latency)
     #[cfg(feature = "streaming")]
     if self.is_native_streaming_active_for_playback() {

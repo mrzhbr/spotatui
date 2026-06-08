@@ -1,6 +1,7 @@
 use super::requests::is_rate_limited_error;
 use super::Network;
 use crate::core::app::{ActiveBlock, DiscoverTimeRange, RouteId};
+use crate::core::playback_target::PlaybackTarget;
 use anyhow::anyhow;
 
 use rand::seq::SliceRandom;
@@ -53,18 +54,82 @@ impl UserNetwork for Network {
   }
 
   async fn get_devices(&mut self) {
-    if let Ok(result) = self
-      .spotify_get_typed::<DevicePayload>("me/player/devices", &[])
-      .await
     {
       let mut app = self.app.lock().await;
       app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
-      if !result.devices.is_empty() {
-        app.devices = Some(result);
-        // Select the first device in the list
-        app.selected_device_index = Some(0);
+    }
+
+    let spotify_devices = self.spotify_get_typed::<DevicePayload>("me/player/devices", &[]);
+    let sonos_rooms = crate::infra::sonos::discover_rooms();
+    let (spotify_devices, sonos_rooms) = tokio::join!(spotify_devices, sonos_rooms);
+
+    let mut app = self.app.lock().await;
+
+    if let Ok(result) = spotify_devices {
+      app.devices = Some(result);
+    }
+
+    match sonos_rooms {
+      Ok(rooms) => {
+        if rooms.is_empty() {
+          if app.sonos_rooms.is_empty()
+            && app
+              .devices
+              .as_ref()
+              .is_none_or(|payload| payload.devices.is_empty())
+          {
+            app.set_status_message(
+              "No Spotify or Sonos devices found. Make sure a device is active and Sonos is on this network.",
+              6,
+            );
+          }
+        } else {
+          app.sonos_rooms = rooms;
+        }
+      }
+      Err(e) => {
+        if app.sonos_rooms.is_empty()
+          && app
+            .devices
+            .as_ref()
+            .is_none_or(|payload| payload.devices.is_empty())
+        {
+          app.set_status_message(format!("No Sonos rooms found via SSDP: {e}"), 6);
+        }
       }
     }
+
+    let targets = app.playback_targets();
+    app.selected_device_index = if targets.is_empty() {
+      None
+    } else if let Some(selected_uuid) = app.selected_sonos_room_uuid.as_deref() {
+      targets
+        .iter()
+        .position(|target| {
+          matches!(target, PlaybackTarget::Sonos { room, .. } if room.uuid == selected_uuid)
+        })
+        .or_else(|| Some(app.selected_device_index.unwrap_or(0).min(targets.len() - 1)))
+    } else {
+      targets
+        .iter()
+        .position(|target| {
+          matches!(
+            target,
+            PlaybackTarget::Spotify {
+              is_active: true,
+              ..
+            }
+          )
+        })
+        .or_else(|| {
+          Some(
+            app
+              .selected_device_index
+              .unwrap_or(0)
+              .min(targets.len() - 1),
+          )
+        })
+    };
   }
 
   async fn get_user_top_tracks(&mut self, time_range: DiscoverTimeRange) {
