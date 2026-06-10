@@ -158,76 +158,97 @@ fn handle_low_press_on_selected_block(app: &mut App) {
 
 fn handle_recommend_event_on_selected_block(app: &mut App) {
   //recommendations.
-  if let Some(artist) = &mut app.artist.clone() {
-    match artist.artist_selected_block {
+  let request = app
+    .artist
+    .as_ref()
+    .and_then(|artist| match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
-        let selected_index = artist.selected_top_track_index;
-        if let Some(track) = artist.top_tracks.get(selected_index) {
-          let track_id_list: Option<Vec<String>> =
-            track.id.as_ref().map(|id| vec![id.id().to_string()]);
-          app.recommendations_context = Some(RecommendationsContext::Song);
-          app.recommendations_seed = track.name.clone();
-          app.get_recommendations_for_seed(None, track_id_list, Some(track.clone()));
-        }
+        artist
+          .top_tracks
+          .get(artist.selected_top_track_index)
+          .map(|track| {
+            let track_id_list = track.id.as_ref().map(|id| vec![id.id().to_string()]);
+            (
+              RecommendationsContext::Song,
+              track.name.clone(),
+              None,
+              track_id_list,
+              Some(track.clone()),
+            )
+          })
       }
-      ArtistBlock::RelatedArtists => {
-        let selected_index = artist.selected_related_artist_index;
-        let artist_id = &artist.related_artists[selected_index].id;
-        let artist_name = &artist.related_artists[selected_index].name;
-        let artist_id_list: Option<Vec<String>> = Some(vec![artist_id.id().to_string()]);
+      ArtistBlock::RelatedArtists => artist
+        .related_artists
+        .get(artist.selected_related_artist_index)
+        .map(|related_artist| {
+          (
+            RecommendationsContext::Artist,
+            related_artist.name.clone(),
+            Some(vec![related_artist.id.id().to_string()]),
+            None,
+            None,
+          )
+        }),
+      _ => None,
+    });
 
-        app.recommendations_context = Some(RecommendationsContext::Artist);
-        app.recommendations_seed = artist_name.clone();
-        app.get_recommendations_for_seed(artist_id_list, None, None);
-      }
-      _ => {}
-    }
+  if let Some((context, seed, artist_id_list, track_id_list, seed_track)) = request {
+    app.recommendations_context = Some(context);
+    app.recommendations_seed = seed;
+    app.get_recommendations_for_seed(artist_id_list, track_id_list, seed_track);
   }
 }
 
 fn handle_enter_event_on_selected_block(app: &mut App) {
-  if let Some(artist) = &mut app.artist.clone() {
-    match artist.artist_selected_block {
-      ArtistBlock::TopTracks => {
-        let selected_index = artist.selected_top_track_index;
-        let top_tracks: Vec<PlayableId<'static>> = artist
-          .top_tracks
-          .iter()
-          .filter_map(|track| {
-            track
-              .id
-              .as_ref()
-              .map(|id| PlayableId::Track(id.clone().into_static()))
-          })
-          .collect();
-        app.dispatch(IoEvent::StartPlayback(
-          None,
-          Some(top_tracks),
-          Some(selected_index),
-        ));
+  let Some(artist) = app.artist.as_ref() else {
+    return;
+  };
+
+  match artist.artist_selected_block {
+    ArtistBlock::TopTracks => {
+      let selected_index = artist.selected_top_track_index;
+      let top_tracks: Vec<PlayableId<'static>> = artist
+        .top_tracks
+        .iter()
+        .filter_map(|track| {
+          track
+            .id
+            .as_ref()
+            .map(|id| PlayableId::Track(id.clone().into_static()))
+        })
+        .collect();
+      app.dispatch(IoEvent::StartPlayback(
+        None,
+        Some(top_tracks),
+        Some(selected_index),
+      ));
+    }
+    ArtistBlock::Albums => {
+      let selected_album = artist
+        .albums
+        .items
+        .get(artist.selected_album_index)
+        .cloned();
+      if let Some(selected_album) = selected_album {
+        app.track_table.context = Some(TrackTableContext::AlbumSearch);
+        app.dispatch(IoEvent::GetAlbumTracks(Box::new(selected_album)));
       }
-      ArtistBlock::Albums => {
-        if let Some(selected_album) = artist
-          .albums
-          .items
-          .get(artist.selected_album_index)
-          .cloned()
-        {
-          app.track_table.context = Some(TrackTableContext::AlbumSearch);
-          app.dispatch(IoEvent::GetAlbumTracks(Box::new(selected_album)));
-        }
-      }
-      ArtistBlock::RelatedArtists => {
-        let selected_index = artist.selected_related_artist_index;
-        let artist_id = artist.related_artists[selected_index]
-          .id
-          .as_ref()
-          .into_static();
-        let artist_name = artist.related_artists[selected_index].name.clone();
+    }
+    ArtistBlock::RelatedArtists => {
+      let selected_artist = artist
+        .related_artists
+        .get(artist.selected_related_artist_index)
+        .map(|related_artist| {
+          (
+            related_artist.id.as_ref().into_static(),
+            related_artist.name.clone(),
+          )
+        });
+      if let Some((artist_id, artist_name)) = selected_artist {
         app.get_artist(artist_id, artist_name);
       }
-      ArtistBlock::Empty => {}
     }
+    ArtistBlock::Empty => {}
   }
 }
 

@@ -58,8 +58,7 @@ pub fn handler(key: Key, app: &mut App) {
 
 fn jump_to_end(app: &mut App) {
   if let Some(episodes) = app.library.show_episodes.get_results(None) {
-    let last_idx = episodes.items.len() - 1;
-    app.episode_list_index = last_idx;
+    app.episode_list_index = episodes.items.len().saturating_sub(1);
   }
 }
 
@@ -85,13 +84,13 @@ fn handle_prev_event(app: &mut App) {
 fn handle_next_event(app: &mut App) {
   match app.episode_table_context {
     EpisodeTableContext::Full => {
-      if let Some(selected_episode) = app.selected_show_full.clone() {
+      if let Some(selected_episode) = app.selected_show_full.as_ref() {
         let show_id = selected_episode.show.id.id().to_string();
         app.get_episode_table_next(show_id)
       }
     }
     EpisodeTableContext::Simplified => {
-      if let Some(selected_episode) = app.selected_show_simplified.clone() {
+      if let Some(selected_episode) = app.selected_show_simplified.as_ref() {
         let show_id = selected_episode.show.id.id().to_string();
         app.get_episode_table_next(show_id)
       }

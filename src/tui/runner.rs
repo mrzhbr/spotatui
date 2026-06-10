@@ -1,17 +1,11 @@
 use crate::core::app::{self, ActiveBlock, App, RouteId};
 use crate::core::auth;
 use crate::core::user_config::UserConfig;
-#[cfg(any(feature = "audio-viz", feature = "audio-viz-cpal"))]
-use crate::infra::audio;
-#[cfg(feature = "discord-rpc")]
-use crate::infra::discord_rpc;
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-use crate::infra::mpris;
 use crate::infra::network::IoEvent;
 use crate::tui::event::{self, Key};
 use crate::tui::handlers;
 use crate::tui::ui;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use crossterm::{
   cursor::MoveTo,
   event::{
@@ -39,147 +33,67 @@ struct WindowTitleState {
   last_title: Option<String>,
 }
 
-#[cfg(feature = "discord-rpc")]
-pub type DiscordRpcHandle = Option<discord_rpc::DiscordRpcManager>;
-#[cfg(not(feature = "discord-rpc"))]
-pub type DiscordRpcHandle = Option<()>;
-
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-pub type MprisHandle = Option<Arc<mpris::MprisManager>>;
-#[cfg(not(all(feature = "mpris", target_os = "linux")))]
-pub type MprisHandle = Option<()>;
-
-#[cfg(feature = "discord-rpc")]
-#[derive(Clone, Debug, PartialEq)]
-struct DiscordTrackInfo {
-  title: String,
-  artist: String,
-  album: String,
-  image_url: Option<String>,
-  duration_ms: u32,
-}
-
-#[cfg(feature = "discord-rpc")]
 #[derive(Default)]
-struct DiscordPresenceState {
-  last_track: Option<DiscordTrackInfo>,
-  last_is_playing: Option<bool>,
-  last_progress_ms: u128,
+struct CursorVisibilityState {
+  is_visible: Option<bool>,
 }
 
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-#[derive(Default, PartialEq)]
-struct MprisMetadata {
-  title: String,
-  artists: Vec<String>,
-  album: String,
-  duration_ms: u32,
-  art_url: Option<String>,
-}
-
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-#[derive(Default)]
-struct MprisState {
-  last_metadata: Option<MprisMetadata>,
-  last_is_playing: Option<bool>,
-  last_shuffle: Option<bool>,
-  last_loop: Option<mpris::LoopStatusEvent>,
-}
-
-#[cfg(feature = "discord-rpc")]
-fn build_discord_playback(app: &App) -> Option<discord_rpc::DiscordPlayback> {
-  let snapshot = crate::infra::media_metadata::current_playback_snapshot(app)?;
-  let artist = snapshot.primary_artist();
-  let track_info = DiscordTrackInfo {
-    title: snapshot.metadata.title,
-    artist,
-    album: snapshot.metadata.album,
-    image_url: snapshot.metadata.image_url,
-    duration_ms: snapshot.metadata.duration_ms,
-  };
-
-  let base_state = if track_info.album.is_empty() {
-    track_info.artist.clone()
+fn next_cursor_visibility_update(
+  state: &mut CursorVisibilityState,
+  desired_visible: bool,
+) -> Option<bool> {
+  if state.is_visible == Some(desired_visible) {
+    None
   } else {
-    format!("{} - {}", track_info.artist, track_info.album)
-  };
-  let state = if snapshot.is_playing {
-    base_state
-  } else if base_state.is_empty() {
-    "Paused".to_string()
-  } else {
-    format!("Paused: {}", base_state)
-  };
-
-  Some(discord_rpc::DiscordPlayback {
-    title: track_info.title,
-    artist: track_info.artist,
-    album: track_info.album,
-    state,
-    image_url: track_info.image_url,
-    duration_ms: track_info.duration_ms,
-    progress_ms: snapshot.progress_ms,
-    is_playing: snapshot.is_playing,
-  })
-}
-
-#[cfg(feature = "discord-rpc")]
-fn update_discord_presence(
-  manager: &discord_rpc::DiscordRpcManager,
-  state: &mut DiscordPresenceState,
-  app: &App,
-) {
-  let playback = build_discord_playback(app);
-
-  match playback {
-    Some(playback) => {
-      let track_info = DiscordTrackInfo {
-        title: playback.title.clone(),
-        artist: playback.artist.clone(),
-        album: playback.album.clone(),
-        image_url: playback.image_url.clone(),
-        duration_ms: playback.duration_ms,
-      };
-
-      let track_changed = state.last_track.as_ref() != Some(&track_info);
-      let playing_changed = state.last_is_playing != Some(playback.is_playing);
-      let progress_delta = playback.progress_ms.abs_diff(state.last_progress_ms);
-      let progress_changed = progress_delta > 5000;
-
-      if track_changed || playing_changed || progress_changed {
-        manager.set_activity(&playback);
-        state.last_track = Some(track_info);
-        state.last_is_playing = Some(playback.is_playing);
-        state.last_progress_ms = playback.progress_ms;
-      }
-    }
-    None => {
-      if state.last_track.is_some() {
-        manager.clear();
-        state.last_track = None;
-        state.last_is_playing = None;
-        state.last_progress_ms = 0;
-      }
-    }
+    state.is_visible = Some(desired_visible);
+    Some(desired_visible)
   }
 }
 
 fn playback_window_title(app: &App) -> String {
-  let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) else {
+  if app.is_streaming_active {
+    if let Some(native_info) = app.native_track_info.as_ref() {
+      return playback_window_title_from_parts(&native_info.name, &native_info.artists_display);
+    }
+  }
+
+  let Some(item) = app
+    .current_playback_context
+    .as_ref()
+    .and_then(|context| context.item.as_ref())
+  else {
     return DEFAULT_WINDOW_TITLE.to_string();
   };
 
-  let title = sanitize_window_title_component(&snapshot.metadata.title);
-  let artist = sanitize_window_title_component(&snapshot.primary_artist());
-  if artist.trim().is_empty() {
-    title
-  } else {
-    format!("{} — {}", title, artist)
+  match item {
+    rspotify::model::PlayableItem::Track(track) => {
+      let artist = crate::tui::ui::util::create_artist_string(&track.artists);
+      playback_window_title_from_parts(&track.name, &artist)
+    }
+    rspotify::model::PlayableItem::Episode(episode) => {
+      playback_window_title_from_parts(&episode.name, &episode.show.name)
+    }
+    rspotify::model::PlayableItem::Unknown(_) => DEFAULT_WINDOW_TITLE.to_string(),
   }
 }
 
-fn sanitize_window_title_component(value: &str) -> String {
-  value.chars().filter(|c| !c.is_control()).collect()
+fn playback_window_title_from_parts(title: &str, artist: &str) -> String {
+  let mut display = String::with_capacity(title.len() + 3 + artist.len());
+  append_sanitized_window_title_component(&mut display, title);
+
+  if artist
+    .chars()
+    .any(|c| !c.is_control() && !c.is_whitespace())
+  {
+    display.push_str(" — ");
+    append_sanitized_window_title_component(&mut display, artist);
+  }
+
+  display
+}
+
+fn append_sanitized_window_title_component(display: &mut String, value: &str) {
+  display.extend(value.chars().filter(|c| !c.is_control()));
 }
 
 fn next_window_title(state: &mut WindowTitleState, app: &App) -> Option<String> {
@@ -237,6 +151,23 @@ mod tests {
   }
 
   #[test]
+  fn cursor_visibility_update_only_emits_on_changes() {
+    let mut state = CursorVisibilityState::default();
+
+    assert_eq!(
+      next_cursor_visibility_update(&mut state, false),
+      Some(false)
+    );
+    assert_eq!(next_cursor_visibility_update(&mut state, false), None);
+    assert_eq!(next_cursor_visibility_update(&mut state, true), Some(true));
+    assert_eq!(next_cursor_visibility_update(&mut state, true), None);
+    assert_eq!(
+      next_cursor_visibility_update(&mut state, false),
+      Some(false)
+    );
+  }
+
+  #[test]
   fn playback_window_title_uses_current_native_track() {
     let mut app = app();
     app.is_streaming_active = true;
@@ -245,7 +176,6 @@ mod tests {
       artists_display: "The Artist".to_string(),
       album: "The Album".to_string(),
       duration_ms: 180_000,
-      kind: crate::core::app::NativeTrackKind::Track,
     });
 
     assert_eq!(playback_window_title(&app), "The Track — The Artist");
@@ -260,7 +190,6 @@ mod tests {
       artists_display: "The\nArtist".to_string(),
       album: "The Album".to_string(),
       duration_ms: 180_000,
-      kind: crate::core::app::NativeTrackKind::Track,
     });
 
     assert_eq!(playback_window_title(&app), "The]2;Bad Track — TheArtist");
@@ -310,59 +239,6 @@ mod tests {
   }
 }
 
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-fn update_mpris_state(manager: &mpris::MprisManager, state: &mut MprisState, app: &App) {
-  use rspotify::model::enums::RepeatState;
-
-  if let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) {
-    let new_metadata = MprisMetadata {
-      title: snapshot.metadata.title.clone(),
-      artists: snapshot.metadata.artists.clone(),
-      album: snapshot.metadata.album.clone(),
-      duration_ms: snapshot.metadata.duration_ms,
-      art_url: snapshot.metadata.image_url.clone(),
-    };
-    if state.last_metadata.as_ref() != Some(&new_metadata) {
-      manager.set_metadata(
-        &snapshot.metadata.title,
-        &snapshot.metadata.artists,
-        &snapshot.metadata.album,
-        snapshot.metadata.duration_ms,
-        snapshot.metadata.image_url.clone(),
-      );
-      state.last_metadata = Some(new_metadata);
-    }
-
-    if state.last_is_playing != Some(snapshot.is_playing) {
-      manager.set_playback_status(snapshot.is_playing);
-      state.last_is_playing = Some(snapshot.is_playing);
-    }
-
-    manager.set_position(snapshot.progress_ms as u64);
-
-    if state.last_shuffle != Some(snapshot.shuffle) {
-      manager.set_shuffle(snapshot.shuffle);
-      state.last_shuffle = Some(snapshot.shuffle);
-    }
-
-    if let Some(repeat_state) = snapshot.repeat {
-      let loop_status = match repeat_state {
-        RepeatState::Off => mpris::LoopStatusEvent::None,
-        RepeatState::Track => mpris::LoopStatusEvent::Track,
-        RepeatState::Context => mpris::LoopStatusEvent::Playlist,
-      };
-      if state.last_loop != Some(loop_status) {
-        manager.set_loop_status(loop_status);
-        state.last_loop = Some(loop_status);
-      }
-    }
-  } else if state.last_metadata.is_some() {
-    manager.set_stopped();
-    state.last_metadata = None;
-    state.last_is_playing = None;
-  }
-}
-
 #[cfg(feature = "streaming")]
 async fn pause_native_playback_before_exit(app: &Arc<Mutex<App>>) {
   let player = {
@@ -403,16 +279,10 @@ pub async fn start_ui(
   user_config: UserConfig,
   app: &Arc<Mutex<App>>,
   shared_position: Option<Arc<AtomicU64>>,
-  mpris_manager: MprisHandle,
-  discord_rpc_manager: DiscordRpcHandle,
 ) -> Result<()> {
   info!("ui thread initialized");
-  #[cfg(not(feature = "discord-rpc"))]
-  let _ = discord_rpc_manager;
   #[cfg(not(feature = "streaming"))]
   let _ = &shared_position;
-  #[cfg(not(all(feature = "mpris", target_os = "linux")))]
-  let _ = &mpris_manager;
 
   let mut terminal = ratatui::init();
   execute!(stdout(), EnableMouseCapture)?;
@@ -439,36 +309,14 @@ pub async fn start_ui(
 
   let events = event::Events::new(user_config.behavior.tick_rate_milliseconds);
 
-  #[cfg(all(feature = "mpris", target_os = "linux"))]
-  let mut prev_is_streaming_active = false;
-
-  #[cfg(any(feature = "audio-viz", feature = "audio-viz-cpal"))]
-  let mut audio_capture: Option<audio::AudioCaptureManager> = None;
-
-  #[cfg(feature = "discord-rpc")]
-  let mut discord_presence_state = DiscordPresenceState::default();
-
-  #[cfg(all(feature = "mpris", target_os = "linux"))]
-  let mut mpris_state = MprisState::default();
-
   let mut window_title_state = WindowTitleState::default();
+  let mut cursor_visibility_state = CursorVisibilityState::default();
   let mut is_first_render = true;
 
   loop {
     let terminal_size = terminal.backend().size().ok();
     let title_update = {
       let mut app = app.lock().await;
-
-      #[cfg(all(feature = "mpris", target_os = "linux"))]
-      {
-        let current_is_streaming_active = app.is_streaming_active;
-        if prev_is_streaming_active && !current_is_streaming_active {
-          if let Some(ref mpris) = mpris_manager {
-            mpris.set_stopped();
-          }
-        }
-        prev_is_streaming_active = current_is_streaming_active;
-      }
 
       if let Some(size) = terminal_size {
         if is_first_render || app.size != size {
@@ -496,16 +344,7 @@ pub async fn start_ui(
       };
 
       let current_route = app.get_current_route();
-      let animation_active = matches!(
-        current_route.active_block,
-        ActiveBlock::Analysis | ActiveBlock::Home
-      ) || app.liked_song_animation_frame.is_some();
-      let current_tick_rate = if animation_active {
-        app.user_config.behavior.animation_tick_rate_milliseconds
-      } else {
-        app.user_config.behavior.tick_rate_milliseconds
-      };
-      events.set_tick_rate(current_tick_rate);
+      events.set_tick_rate(app.user_config.behavior.tick_rate_milliseconds);
 
       terminal.draw(|f| {
         use ratatui::{prelude::Style, widgets::Block};
@@ -517,18 +356,12 @@ pub async fn start_ui(
         match current_route.active_block {
           ActiveBlock::HelpMenu => ui::draw_help_menu(f, &app),
           ActiveBlock::Queue => ui::draw_queue(f, &app),
-          ActiveBlock::Party => {
-            ui::draw_main_layout(f, &app);
-            ui::draw_party(f, &app);
-          }
           ActiveBlock::Error => ui::draw_error_screen(f, &app),
           ActiveBlock::SelectDevice => ui::draw_device_list(f, &app),
-          ActiveBlock::Analysis => ui::audio_analysis::draw(f, &app),
           ActiveBlock::LyricsView => ui::draw_lyrics_view(f, &app),
           ActiveBlock::MiniPlayer => ui::draw_miniplayer(f, &app),
           #[cfg(feature = "cover-art")]
           ActiveBlock::CoverArtView => ui::draw_cover_art_view(f, &app),
-          ActiveBlock::AnnouncementPrompt => ui::draw_announcement_prompt(f, &app),
           ActiveBlock::ExitPrompt => ui::draw_exit_prompt(f, &app),
           ActiveBlock::Settings => ui::settings::draw_settings(f, &app),
           ActiveBlock::CreatePlaylistForm => {
@@ -539,22 +372,29 @@ pub async fn start_ui(
         }
       })?;
 
-      if current_route.active_block == ActiveBlock::Input {
-        terminal.show_cursor()?;
-      } else {
-        terminal.hide_cursor()?;
+      let cursor_should_be_visible = current_route.active_block == ActiveBlock::Input;
+      if let Some(visible) =
+        next_cursor_visibility_update(&mut cursor_visibility_state, cursor_should_be_visible)
+      {
+        if visible {
+          terminal.show_cursor()?;
+        } else {
+          terminal.hide_cursor()?;
+        }
       }
 
-      let cursor_offset = if app.size.height > ui::util::SMALL_TERMINAL_HEIGHT {
-        2
-      } else {
-        1
-      };
+      if cursor_should_be_visible {
+        let cursor_offset = if app.size.height > ui::util::SMALL_TERMINAL_HEIGHT {
+          2
+        } else {
+          1
+        };
 
-      terminal.backend_mut().execute(MoveTo(
-        cursor_offset + app.input_cursor_position - app.input_scroll_offset.get(),
-        cursor_offset,
-      ))?;
+        terminal.backend_mut().execute(MoveTo(
+          cursor_offset + app.input_cursor_position - app.input_scroll_offset.get(),
+          cursor_offset,
+        ))?;
+      }
 
       if auth::should_refresh_token_at(app.spotify_token_expiry, SystemTime::now())
         && !app.auth_refresh_in_progress
@@ -598,20 +438,6 @@ pub async fn start_ui(
           if !back_key_clears_playlist_filter(&mut app, current_active_block) {
             if current_active_block == ActiveBlock::Settings {
               handlers::handle_app(key, &mut app);
-            } else if app.get_current_route().active_block == ActiveBlock::AnnouncementPrompt {
-              if let Some(dismissed_id) = app.dismiss_active_announcement() {
-                app.user_config.mark_announcement_seen(dismissed_id);
-                if let Err(error) = app.user_config.save_config() {
-                  app.handle_error(anyhow!(
-                    "Failed to persist dismissed announcement: {}",
-                    error
-                  ));
-                }
-              }
-
-              if app.active_announcement.is_none() {
-                app.pop_navigation_stack();
-              }
             } else if app.get_current_route().active_block != ActiveBlock::Input {
               let pop_result = match app.pop_navigation_stack() {
                 Some(ref x) if x.id == RouteId::Search => app.pop_navigation_stack(),
@@ -648,16 +474,6 @@ pub async fn start_ui(
         app.flush_pending_api_seek();
         app.flush_pending_volume();
 
-        #[cfg(feature = "discord-rpc")]
-        if let Some(ref manager) = discord_rpc_manager {
-          update_discord_presence(manager, &mut discord_presence_state, &app);
-        }
-
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          update_mpris_state(mpris, &mut mpris_state, &app);
-        }
-
         #[cfg(feature = "streaming")]
         if let Some(ref pos) = shared_position {
           if app.is_streaming_active {
@@ -682,32 +498,6 @@ pub async fn start_ui(
             }
           }
         }
-
-        #[cfg(any(feature = "audio-viz", feature = "audio-viz-cpal"))]
-        {
-          let in_analysis_view = app.get_current_route().active_block == ActiveBlock::Analysis;
-
-          if in_analysis_view {
-            if audio_capture.is_none() {
-              audio_capture = audio::AudioCaptureManager::new();
-              app.audio_capture_active = audio_capture.is_some();
-            }
-
-            if let Some(ref capture) = audio_capture {
-              if let Some(spectrum) = capture.get_spectrum() {
-                app.spectrum_data = Some(app::SpectrumData {
-                  bands: spectrum.bands,
-                  peak: spectrum.peak,
-                });
-                app.audio_capture_active = capture.is_active();
-              }
-            }
-          } else if audio_capture.is_some() {
-            audio_capture = None;
-            app.audio_capture_active = false;
-            app.spectrum_data = None;
-          }
-        }
       }
     }
 
@@ -716,11 +506,7 @@ pub async fn start_ui(
       app.dispatch(IoEvent::GetPlaylists);
       app.dispatch(IoEvent::GetUser);
       app.dispatch(IoEvent::GetCurrentPlayback);
-      if app.user_config.behavior.enable_global_song_count {
-        app.dispatch(IoEvent::FetchGlobalSongCount);
-      }
-      app.dispatch(IoEvent::FetchAnnouncements);
-      app.help_docs_size = ui::help::get_help_docs(&app).len() as u32;
+      app.help_docs_size = ui::help::HELP_DOCS_LEN as u32;
       is_first_render = false;
     }
   }
@@ -728,33 +514,12 @@ pub async fn start_ui(
   #[cfg(feature = "streaming")]
   pause_native_playback_before_exit(app).await;
 
-  // Sync history to cloud on exit
-  let sync_token_opt = {
-    let app_guard = app.lock().await;
-    app_guard.user_config.behavior.sync_token.clone()
-  };
-
-  if let Some(token) = sync_token_opt {
-    info!("Synchronizing listening history to cloud before exit...");
-    if let Err(e) = crate::infra::history::sync_history_to_cloud(&token).await {
-      log::warn!("failed to run exit history cloud sync: {}", e);
-    }
-    if let Err(e) = crate::infra::history::clear_now_playing_from_cloud(&token).await {
-      log::warn!("failed to clear now-playing on exit: {}", e);
-    }
-  }
-
   reset_window_title(&mut window_title_state)?;
   execute!(stdout(), DisableMouseCapture)?;
   if keyboard_enhancement_enabled {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
   }
   ratatui::restore();
-
-  #[cfg(feature = "discord-rpc")]
-  if let Some(ref manager) = discord_rpc_manager {
-    manager.clear();
-  }
 
   Ok(())
 }

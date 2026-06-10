@@ -53,45 +53,46 @@ fn handle_confirmation_dialog(key: Key, app: &mut App, dialog_context: DialogCon
 }
 
 fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
-  let editable_playlists = app.editable_playlists();
-  let playlist_count = editable_playlists.len();
+  let playlist_count = app.editable_playlist_count();
   match key {
     k if common_key_events::down_event(k) && playlist_count > 0 => {
-      let next = common_key_events::on_down_press_handler(
-        &editable_playlists,
-        Some(app.playlist_picker_selected_index),
-      );
-      app.playlist_picker_selected_index = next;
+      app.playlist_picker_selected_index =
+        (app.playlist_picker_selected_index + 1) % playlist_count;
     }
     k if common_key_events::up_event(k) && playlist_count > 0 => {
-      let next = common_key_events::on_up_press_handler(
-        &editable_playlists,
-        Some(app.playlist_picker_selected_index),
-      );
-      app.playlist_picker_selected_index = next;
+      app.playlist_picker_selected_index = if app.playlist_picker_selected_index == 0 {
+        playlist_count - 1
+      } else {
+        app.playlist_picker_selected_index - 1
+      };
     }
     k if common_key_events::high_event(k) && playlist_count > 0 => {
       app.playlist_picker_selected_index = common_key_events::on_high_press_handler();
     }
     k if common_key_events::middle_event(k) && playlist_count > 0 => {
-      app.playlist_picker_selected_index =
-        common_key_events::on_middle_press_handler(&editable_playlists);
+      app.playlist_picker_selected_index = middle_index(playlist_count);
     }
     k if common_key_events::low_event(k) && playlist_count > 0 => {
-      app.playlist_picker_selected_index =
-        common_key_events::on_low_press_handler(&editable_playlists);
+      app.playlist_picker_selected_index = playlist_count.saturating_sub(1);
     }
     Key::Enter => {
-      if let Some(pending_add) = app.pending_playlist_track_add.clone() {
-        let selected = app
-          .playlist_picker_selected_index
-          .min(playlist_count.saturating_sub(1));
-        if let Some(playlist) = editable_playlists.get(selected) {
-          app.dispatch(IoEvent::AddTrackToPlaylist(
-            playlist.id.clone().into_static(),
-            pending_add.track_id,
-          ));
-        }
+      let selected = app
+        .playlist_picker_selected_index
+        .min(playlist_count.saturating_sub(1));
+      let request = app
+        .pending_playlist_track_add
+        .as_ref()
+        .and_then(|pending_add| {
+          app.editable_playlist_at(selected).map(|playlist| {
+            (
+              playlist.id.clone().into_static(),
+              pending_add.track_id.clone(),
+            )
+          })
+        });
+
+      if let Some((playlist_id, track_id)) = request {
+        app.dispatch(IoEvent::AddTrackToPlaylist(playlist_id, track_id));
       }
       close_dialog(app);
     }
@@ -99,6 +100,19 @@ fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
       close_dialog(app);
     }
     _ => {}
+  }
+}
+
+fn middle_index(item_count: usize) -> usize {
+  if item_count == 0 {
+    return 0;
+  }
+
+  let index = item_count / 2;
+  if item_count.is_multiple_of(2) {
+    index - 1
+  } else {
+    index
   }
 }
 
@@ -111,11 +125,22 @@ fn handle_playlist_search_dialog(app: &mut App) {
 }
 
 fn handle_remove_track_from_playlist_confirm(app: &mut App) {
-  if let Some(pending_remove) = app.pending_playlist_track_removal.clone() {
+  let request = app
+    .pending_playlist_track_removal
+    .as_ref()
+    .map(|pending_remove| {
+      (
+        pending_remove.playlist_id.clone(),
+        pending_remove.track_id.clone(),
+        pending_remove.position,
+      )
+    });
+
+  if let Some((playlist_id, track_id, position)) = request {
     app.dispatch(IoEvent::RemoveTrackFromPlaylistAtPosition(
-      pending_remove.playlist_id,
-      pending_remove.track_id,
-      pending_remove.position,
+      playlist_id,
+      track_id,
+      position,
     ));
   }
 }

@@ -9,7 +9,9 @@ use crate::core::layout::{
 use crate::tui::event::Key;
 use crate::tui::ui::player::playbar_control_at;
 use crate::tui::ui::tables::table_scroll_offset;
-use crate::tui::ui::util::{get_main_layout_margin, SMALL_TERMINAL_WIDTH};
+use crate::tui::ui::util::{
+  get_main_layout_margin, selectable_list_scroll_offset, SMALL_TERMINAL_WIDTH,
+};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -319,7 +321,14 @@ fn selected_setting_expects_key_capture(app: &App) -> bool {
 
 fn select_clicked_setting(mouse_row: u16, list_area: Rect, app: &mut App) {
   let item_count = app.settings_items.len();
-  let Some(clicked_index) = settings_item_index_from_click(list_area, mouse_row, item_count) else {
+  let Some(clicked_index) = settings_item_index_from_click(
+    list_area,
+    mouse_row,
+    app
+      .settings_selected_index
+      .min(item_count.saturating_sub(1)),
+    item_count,
+  ) else {
     return;
   };
 
@@ -382,16 +391,13 @@ fn is_main_layout_mouse_interactive(active_block: ActiveBlock) -> bool {
       | ActiveBlock::Queue
       | ActiveBlock::Error
       | ActiveBlock::SelectDevice
-      | ActiveBlock::Analysis
       | ActiveBlock::LyricsView
       | ActiveBlock::CoverArtView
       | ActiveBlock::MiniPlayer
-      | ActiveBlock::AnnouncementPrompt
       | ActiveBlock::ExitPrompt
       | ActiveBlock::Settings
       | ActiveBlock::Dialog(_)
       | ActiveBlock::SortMenu
-      | ActiveBlock::Party
   )
 }
 
@@ -460,10 +466,7 @@ fn select_clicked_library_item(mouse_row: u16, list_area: Rect, app: &mut App) {
 }
 
 fn select_clicked_playlist(mouse_row: u16, list_area: Rect, app: &mut App) {
-  let item_count = app.get_playlist_display_count();
-  if item_count == 0 {
-    return;
-  }
+  let item_count = app.get_playlist_display_count().saturating_add(1);
 
   let selected_index = app
     .selected_playlist_index
@@ -734,6 +737,7 @@ fn settings_tab_index_from_click(
 fn settings_item_index_from_click(
   list_area: Rect,
   mouse_row: u16,
+  selected_index: usize,
   item_count: usize,
 ) -> Option<usize> {
   if item_count == 0 || list_area.height <= 2 {
@@ -749,8 +753,11 @@ fn settings_item_index_from_click(
     return None;
   }
 
+  let visible_rows = list_area.height.saturating_sub(2) as usize;
+  let offset = selectable_list_scroll_offset(selected_index, visible_rows);
   let row_index = (mouse_row - inner_top) as usize;
-  (row_index < item_count).then_some(row_index)
+  let clicked_index = offset + row_index;
+  (clicked_index < item_count).then_some(clicked_index)
 }
 
 struct MainLayoutAreas {
@@ -1871,6 +1878,19 @@ mod tests {
 
     let current_route = app.get_current_route();
     assert_eq!(current_route.active_block, ActiveBlock::Library);
+  }
+
+  #[test]
+  fn settings_click_mapping_respects_visible_offset() {
+    let area = Rect::new(0, 0, 80, 8);
+    let selected_index = 8;
+    let item_count = 20;
+
+    let first = settings_item_index_from_click(area, 1, selected_index, item_count);
+    let second = settings_item_index_from_click(area, 2, selected_index, item_count);
+
+    assert_eq!(first, Some(3));
+    assert_eq!(second, Some(4));
   }
 
   #[test]

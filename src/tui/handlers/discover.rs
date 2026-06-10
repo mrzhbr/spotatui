@@ -51,7 +51,7 @@ pub fn handler(key: Key, app: &mut App) {
             app.dispatch(IoEvent::GetTopArtistsMix);
           } else {
             // Mix already loaded, show it
-            app.track_table.tracks = app.discover_artists_mix.clone();
+            app.track_table.tracks.clone_from(&app.discover_artists_mix);
             app.track_table.context = Some(TrackTableContext::DiscoverPlaylist);
             app.track_table.selected_index = 0;
             app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
@@ -63,7 +63,7 @@ pub fn handler(key: Key, app: &mut App) {
             app.dispatch(IoEvent::GetUserTopTracks(app.discover_time_range));
           } else {
             // Tracks already loaded, show them
-            app.track_table.tracks = app.discover_top_tracks.clone();
+            app.track_table.tracks.clone_from(&app.discover_top_tracks);
             app.track_table.context = Some(TrackTableContext::DiscoverPlaylist);
             app.track_table.selected_index = 0;
             app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);

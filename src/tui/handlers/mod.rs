@@ -1,7 +1,5 @@
 mod album_list;
 mod album_tracks;
-mod analysis;
-mod announcement_prompt;
 mod artist;
 mod artists;
 mod common_key_events;
@@ -13,7 +11,6 @@ mod discover;
 mod empty;
 mod episode_table;
 mod error_screen;
-mod friends;
 mod help_menu;
 mod home;
 mod input;
@@ -21,7 +18,6 @@ mod library;
 mod lyrics_view;
 mod miniplayer;
 mod mouse;
-mod party;
 mod playbar;
 mod playlist;
 mod podcasts;
@@ -64,19 +60,6 @@ fn open_settings(app: &mut App) {
   app.push_navigation_stack(RouteId::Settings, ActiveBlock::Settings);
 }
 
-fn should_route_friends_before_globals(key: Key, app: &App) -> bool {
-  if app.get_current_route().active_block != ActiveBlock::Friends {
-    return false;
-  }
-
-  app.friend_add_dialog_visible
-    || !app.friend_search_input.is_empty()
-    || matches!(
-      key,
-      Key::Char('a') | Key::Char('c') | Key::Char('u') | Key::Tab
-    )
-}
-
 pub fn handle_app(key: Key, app: &mut App) {
   if app.get_current_route().active_block == ActiveBlock::Settings
     && (app.settings_unsaved_prompt_visible || app.settings_edit_mode)
@@ -85,22 +68,9 @@ pub fn handle_app(key: Key, app: &mut App) {
     return;
   }
 
-  // When Party popup is open, all keys go to the party handler first (so 'c' and 'l' aren't stolen by global bindings).
-  if app.get_current_route().active_block == ActiveBlock::Party {
-    handle_block_events(key, app);
-    return;
-  }
-
   // When Create Playlist form is open, all keys go directly to the form handler
   // (so typed characters aren't stolen by global bindings like 'd', space, etc.)
   if app.get_current_route().active_block == ActiveBlock::CreatePlaylistForm {
-    handle_block_events(key, app);
-    return;
-  }
-
-  // Friends has a few local keys that conflict with globals, plus inline input modes
-  // that need first chance to consume typed characters.
-  if should_route_friends_before_globals(key, app) {
     handle_block_events(key, app);
     return;
   }
@@ -204,9 +174,6 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.copy_album_url => {
       app.copy_album_url();
     }
-    _ if key == app.user_config.keys.audio_analysis => {
-      app.get_audio_analysis();
-    }
     _ if key == app.user_config.keys.lyrics_view => {
       app.push_navigation_stack(RouteId::LyricsView, ActiveBlock::LyricsView);
     }
@@ -221,51 +188,11 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.cover_art_view => {
       app.push_navigation_stack(RouteId::CoverArtView, ActiveBlock::CoverArtView);
     }
-    _ if key == app.user_config.keys.listening_party => {
-      app.push_navigation_stack(RouteId::Party, ActiveBlock::Party);
-    }
     _ if key == app.user_config.keys.like_track => {
       if is_input_mode(app) {
         handle_block_events(key, app);
       } else {
         playbar::toggle_like_currently_playing_item(app);
-      }
-    }
-    _ if key == app.user_config.keys.generate_recap => {
-      if is_input_mode(app) {
-        handle_block_events(key, app);
-      } else {
-        match dirs::home_dir() {
-          Some(home) => {
-            let output_path = home
-              .join(".config")
-              .join("spotatui")
-              .join("spotatui-recap.html");
-            match crate::infra::history::export_history_recap(
-              crate::infra::history::RecapPeriod::ThirtyDays,
-              &output_path,
-            ) {
-              Ok(count) => {
-                app.set_status_message(
-                  format!(
-                    "Listening recap generated at ~/.config/spotatui/spotatui-recap.html ({} listens)",
-                    count
-                  ),
-                  5,
-                );
-                if let Err(e) = open::that(&output_path) {
-                  log::warn!("failed to open recap in browser: {}", e);
-                }
-              }
-              Err(e) => {
-                app.set_status_message(format!("Failed to generate recap: {}", e), 5);
-              }
-            }
-          }
-          None => {
-            app.set_status_message("Error: Could not locate home directory", 5);
-          }
-        }
       }
     }
     // Resize sidebar: { decreases, } increases width
@@ -329,7 +256,6 @@ fn is_input_mode(app: &App) -> bool {
     app.get_current_route().active_block,
     ActiveBlock::Input
       | ActiveBlock::Dialog(_)
-      | ActiveBlock::AnnouncementPrompt
       | ActiveBlock::ExitPrompt
       | ActiveBlock::CreatePlaylistForm
   )
@@ -339,9 +265,6 @@ fn is_input_mode(app: &App) -> bool {
 fn handle_block_events(key: Key, app: &mut App) {
   let current_route = app.get_current_route();
   match current_route.active_block {
-    ActiveBlock::Analysis => {
-      analysis::handler(key, app);
-    }
     ActiveBlock::ArtistBlock => {
       artist::handler(key, app);
     }
@@ -413,9 +336,6 @@ fn handle_block_events(key: Key, app: &mut App) {
       dialog::handler(key, app);
     }
 
-    ActiveBlock::AnnouncementPrompt => {
-      announcement_prompt::handler(key, app);
-    }
     ActiveBlock::ExitPrompt => {}
     ActiveBlock::Settings => {
       settings::handler(key, app);
@@ -426,14 +346,8 @@ fn handle_block_events(key: Key, app: &mut App) {
     ActiveBlock::Queue => {
       queue_menu::handler(key, app);
     }
-    ActiveBlock::Party => {
-      party::handler(key, app);
-    }
     ActiveBlock::CreatePlaylistForm => {
       create_playlist::handler(key, app);
-    }
-    ActiveBlock::Friends => {
-      friends::handler(key, app);
     }
   }
 }
@@ -464,17 +378,12 @@ fn handle_escape(app: &mut App) {
     ActiveBlock::Queue => {
       app.pop_navigation_stack();
     }
-    ActiveBlock::Party => {
-      app.pop_navigation_stack();
-    }
     ActiveBlock::LyricsView | ActiveBlock::CoverArtView | ActiveBlock::MiniPlayer => {
       app.pop_navigation_stack();
     }
     // These are global views that have no active/inactive distinction so do nothing
-    ActiveBlock::SelectDevice | ActiveBlock::Analysis => {}
+    ActiveBlock::SelectDevice => {}
 
-    // Announcement prompt must be dismissed with Enter/Esc, not global escape
-    ActiveBlock::AnnouncementPrompt => {}
     ActiveBlock::ExitPrompt => {}
     // Sort menu closes on escape
     ActiveBlock::SortMenu => {
@@ -484,9 +393,6 @@ fn handle_escape(app: &mut App) {
     }
     ActiveBlock::CreatePlaylistForm => {
       create_playlist::handler(Key::Esc, app);
-    }
-    ActiveBlock::Friends => {
-      friends::handler(Key::Esc, app);
     }
     _ => {
       app.set_current_route_state(Some(ActiveBlock::Empty), None);
@@ -571,16 +477,7 @@ mod tests {
     idtypes::PlaylistId,
     CurrentlyPlayingType, Device, PlayableId, PlayableItem,
   };
-  use std::{
-    sync::mpsc::{channel, TryRecvError},
-    time::SystemTime,
-  };
-
-  fn friends_app() -> App {
-    let mut app = App::default();
-    app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
-    app
-  }
+  use std::{sync::mpsc::channel, time::SystemTime};
 
   #[test]
   fn global_shift_w_adds_current_track_from_anywhere() {
@@ -668,96 +565,6 @@ mod tests {
 
     // In input mode, 'F' should be added to the input buffer
     assert_eq!(app.input, vec!['F']);
-  }
-
-  #[test]
-  fn friends_a_opens_add_dialog_before_global_album_jump() {
-    let (tx, rx) = channel();
-    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    let track = full_track("0000000000000000000001", "Track 1");
-    app.current_playback_context = Some(CurrentPlaybackContext {
-      device: Device {
-        id: Some("device-1".to_string()),
-        is_active: true,
-        is_private_session: false,
-        is_restricted: false,
-        name: "Desk Speaker".to_string(),
-        _type: DeviceType::Computer,
-        volume_percent: Some(42),
-      },
-      repeat_state: RepeatState::Off,
-      shuffle_state: false,
-      context: None,
-      timestamp: Utc::now(),
-      progress: None,
-      is_playing: false,
-      item: Some(PlayableItem::Track(track)),
-      currently_playing_type: CurrentlyPlayingType::Track,
-      actions: Actions::default(),
-    });
-    app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
-
-    handle_app(Key::Char('a'), &mut app);
-
-    assert!(app.friend_add_dialog_visible);
-    assert_eq!(app.get_current_route().active_block, ActiveBlock::Friends);
-    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
-  }
-
-  #[test]
-  fn friends_c_prefers_friend_code_copy_over_global_song_copy() {
-    let mut app = friends_app();
-    app.friend_code = Some("jay-1234".to_string());
-    app.clipboard = None;
-
-    handle_app(Key::Char('c'), &mut app);
-
-    assert_eq!(
-      app.status_message.as_deref(),
-      Some("Clipboard not available")
-    );
-    assert!(!app.friend_add_dialog_visible);
-  }
-
-  #[test]
-  fn friends_search_buffer_keeps_globally_bound_characters_local() {
-    let mut app = friends_app();
-    app.friend_search_input = vec!['j'];
-
-    handle_app(Key::Char('a'), &mut app);
-    handle_app(Key::Char('c'), &mut app);
-
-    assert_eq!(app.friend_search_input, vec!['j', 'a', 'c']);
-    assert!(!app.friend_add_dialog_visible);
-    assert!(app.status_message.is_none());
-  }
-
-  #[test]
-  fn friends_without_local_state_still_allows_non_conflicting_globals() {
-    let (tx, rx) = channel();
-    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
-
-    handle_app(app.user_config.keys.next_track, &mut app);
-
-    match rx.recv().unwrap() {
-      IoEvent::NextTrack => {}
-      _ => panic!("unexpected event"),
-    }
-    assert!(app.friend_search_input.is_empty());
-    assert!(!app.friend_add_dialog_visible);
-  }
-
-  #[test]
-  fn friends_add_dialog_keeps_priority_for_conflicting_keys() {
-    let mut app = friends_app();
-    app.open_friend_add_dialog();
-
-    handle_app(Key::Char('c'), &mut app);
-
-    assert!(app.friend_add_dialog_visible);
-    assert_eq!(app.friend_add_input, vec!['c']);
-    assert!(app.status_message.is_none());
   }
 
   #[test]

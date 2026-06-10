@@ -11,7 +11,7 @@ use chrono::TimeDelta;
 use log::info;
 use reqwest::Method;
 #[cfg(feature = "streaming")]
-use rspotify::model::device::DevicePayload;
+use rspotify::model::device::{Device, DevicePayload};
 use rspotify::model::{
   context::CurrentUserQueue,
   enums::RepeatState,
@@ -231,10 +231,10 @@ fn api_playback_body(
   }
 }
 
-fn playable_item_id(item: &PlayableItem) -> Option<String> {
+fn playable_item_id(item: &PlayableItem) -> Option<&str> {
   match item {
-    PlayableItem::Track(track) => track.id.as_ref().map(|id| id.id().to_string()),
-    PlayableItem::Episode(episode) => Some(episode.id.id().to_string()),
+    PlayableItem::Track(track) => track.id.as_ref().map(|id| id.id()),
+    PlayableItem::Episode(episode) => Some(episode.id.id()),
     PlayableItem::Unknown(_) => None,
   }
 }
@@ -263,9 +263,7 @@ fn api_confirms_native_info_is_current(
     return true;
   }
 
-  playable_item_id(item)
-    .as_deref()
-    .is_some_and(|api_id| Some(api_id) == last_track_id)
+  playable_item_id(item).is_some_and(|api_id| Some(api_id) == last_track_id)
 }
 
 #[cfg(feature = "streaming")]
@@ -292,6 +290,87 @@ fn stale_api_item_should_preserve_native_context(context: StaleApiItemContext) -
       || context.api_device_is_native)
 }
 
+#[cfg(feature = "streaming")]
+fn native_activation_status_message(device_name: &str) -> String {
+  let prefix = "Activating native Spotify device: ";
+  let mut message = String::with_capacity(prefix.len() + device_name.len());
+  message.push_str(prefix);
+  message.push_str(device_name);
+  message
+}
+
+#[cfg(feature = "streaming")]
+fn mark_native_activation_started(
+  app: &mut crate::core::app::App,
+  session_device_id: String,
+  activation_time: Instant,
+) {
+  app.is_streaming_active = true;
+  app.native_activation_pending = true;
+  // Librespot exposes the Connect session device id before Spotify's Web API
+  // necessarily lists it. Store it immediately so local routing and stale
+  // playback contexts can still identify the native target.
+  app.native_device_id = Some(session_device_id);
+  app.last_device_activation = Some(activation_time);
+  app.instant_since_last_current_playback_poll = activation_time - Duration::from_secs(6);
+}
+
+#[cfg(feature = "streaming")]
+fn mark_native_activation_requested(app: &mut crate::core::app::App, activation_time: Instant) {
+  app.is_streaming_active = true;
+  app.last_device_activation = Some(activation_time);
+  app.instant_since_last_current_playback_poll = activation_time - Duration::from_secs(6);
+}
+
+#[cfg(feature = "streaming")]
+fn mark_native_activation_confirmed(app: &mut crate::core::app::App, confirmed_device_id: String) {
+  app.native_device_id = Some(confirmed_device_id);
+  app.native_activation_pending = false;
+}
+
+#[cfg(feature = "streaming")]
+fn mark_direct_native_transfer_started(
+  app: &mut crate::core::app::App,
+  session_device_id: String,
+  activation_time: Instant,
+) {
+  mark_native_activation_started(app, session_device_id, activation_time);
+  app.native_playback_origin = None;
+  // Drop stale previous-device/Sonos state so playback routing follows the
+  // native intent until the next Spotify poll repopulates real state.
+  app.current_playback_context = None;
+  app.selected_sonos_room_uuid = None;
+  app.sonos_is_playing = None;
+  app.sonos_now_playing = None;
+  app.is_volume_change_in_flight = false;
+  app.pending_volume = None;
+  app.last_dispatched_volume = None;
+}
+
+#[cfg(feature = "streaming")]
+fn native_device_confirmation<'a>(
+  payload: &'a DevicePayload,
+  device_name: &str,
+  session_device_id: &str,
+) -> Option<&'a Device> {
+  payload
+    .devices
+    .iter()
+    .find(|device| device.id.as_deref() == Some(session_device_id))
+    .or_else(|| {
+      payload
+        .devices
+        .iter()
+        .find(|device| device.name.eq_ignore_ascii_case(device_name) && device.is_active)
+    })
+    .or_else(|| {
+      payload
+        .devices
+        .iter()
+        .find(|device| device.name.eq_ignore_ascii_case(device_name))
+    })
+}
+
 /// Get the currently active streaming player, if any.
 /// Note: This logic is duplicated in `main.rs` as `active_streaming_player()`.
 /// Both are identical; the difference is input type (Network vs. App Arc).
@@ -305,6 +384,25 @@ async fn current_streaming_player(
 }
 
 #[cfg(feature = "streaming")]
+fn device_names_for_log(payload: &DevicePayload) -> String {
+  let mut names = String::new();
+  for device in &payload.devices {
+    if !names.is_empty() {
+      names.push_str(", ");
+    }
+    names.push_str(&device.name);
+  }
+  names
+}
+
+#[cfg(feature = "streaming")]
+fn native_device_names_match(current_name: &str, native_name: &str) -> bool {
+  current_name == native_name
+    || current_name.eq_ignore_ascii_case(native_name)
+    || current_name.to_lowercase() == native_name.to_lowercase()
+}
+
+#[cfg(feature = "streaming")]
 async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
   let app = network.app.lock().await;
   let streaming_player = app.streaming_player.clone();
@@ -313,10 +411,6 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
   if !player_connected {
     return false;
   }
-
-  let native_device_name = streaming_player
-    .as_ref()
-    .map(|p| p.device_name().to_lowercase());
 
   // If no context yet (e.g., at startup), use the app state flag which is
   // set when the native streaming device is activated/selected.
@@ -334,11 +428,11 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
   }
 
   // Fallback: strict name match (case-insensitive)
-  if let Some(native_name) = native_device_name.as_ref() {
-    let current_device_name = ctx.device.name.to_lowercase();
-    if current_device_name == native_name.as_str() {
-      return true;
-    }
+  if streaming_player
+    .as_ref()
+    .is_some_and(|p| native_device_names_match(&ctx.device.name, p.device_name()))
+  {
+    return true;
   }
 
   // The user explicitly selected the native device very recently; honor that
@@ -499,8 +593,7 @@ impl PlaybackNetwork for Network {
           {
             return current_id == native_id;
           }
-          let native_name = p.device_name().to_lowercase();
-          c.device.name.to_lowercase() == native_name
+          native_device_names_match(&c.device.name, p.device_name())
         });
 
         #[cfg(feature = "streaming")]
@@ -514,7 +607,7 @@ impl PlaybackNetwork for Network {
         let native_streaming_was_active = app.is_streaming_active;
         #[cfg(feature = "streaming")]
         let native_activation_was_pending = app.native_activation_pending;
-        let native_track_id_before_api = app.last_track_id.clone();
+        let native_track_id_before_api = app.last_track_id.as_deref();
         #[cfg(feature = "streaming")]
         let native_track_id_present = native_track_id_before_api.is_some();
         #[cfg(feature = "streaming")]
@@ -522,18 +615,13 @@ impl PlaybackNetwork for Network {
           .item
           .as_ref()
           .and_then(playable_item_id)
-          .as_deref()
-          .is_some_and(|api_id| Some(api_id) == native_track_id_before_api.as_deref());
+          .is_some_and(|api_id| Some(api_id) == native_track_id_before_api);
         let api_item_confirms_native_info = app
           .native_track_info
           .as_ref()
           .zip(c.item.as_ref())
           .is_some_and(|(native_info, item)| {
-            api_confirms_native_info_is_current(
-              &native_info.name,
-              item,
-              native_track_id_before_api.as_deref(),
-            )
+            api_confirms_native_info_is_current(&native_info.name, item, native_track_id_before_api)
           });
         #[cfg(feature = "streaming")]
         let stale_api_item_for_native =
@@ -557,14 +645,10 @@ impl PlaybackNetwork for Network {
             match item {
               PlayableItem::Track(track) => {
                 if let Some(ref track_id) = track.id {
-                  let track_id_str = track_id.id().to_string();
+                  let track_id_str = track_id.id();
 
                   // Check if this is a new track
-                  if app.last_track_id.as_ref() != Some(&track_id_str) {
-                    if app.user_config.behavior.enable_global_song_count {
-                      app.dispatch(IoEvent::IncrementGlobalSongCount);
-                    }
-
+                  if app.last_track_id.as_deref() != Some(track_id_str) {
                     // Trigger lyrics fetch
                     let duration_secs = track.duration.num_seconds() as f64;
                     app.dispatch(IoEvent::GetLyrics(
@@ -576,9 +660,8 @@ impl PlaybackNetwork for Network {
                     app.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![track_id
                       .clone()
                       .into_static()]));
+                    app.last_track_id = Some(track_id_str.to_owned());
                   }
-
-                  app.last_track_id = Some(track_id_str);
                 };
               }
               PlayableItem::Episode(_episode) => { /*should map this to following the podcast show*/
@@ -691,10 +774,12 @@ impl PlaybackNetwork for Network {
         app.is_fetching_current_playback = false;
 
         let err = anyhow!(e);
+        let err_text = err.to_string();
+        let err_text_lower = err_text.to_lowercase();
 
-        if err.to_string().contains("429")
-          || err.to_string().contains("Too Many Requests")
-          || err.to_string().contains("Too many requests")
+        if err_text.contains("429")
+          || err_text.contains("Too Many Requests")
+          || err_text.contains("Too many requests")
         {
           app.status_message = Some(
             "Spotify rate limit hit. Retrying automatically; please wait a few seconds."
@@ -705,15 +790,12 @@ impl PlaybackNetwork for Network {
           return;
         }
 
-        if err
-          .to_string()
-          .to_lowercase()
-          .contains("error sending request for url")
-          || err.to_string().contains("connection reset")
-          || err.to_string().contains("connection refused")
-          || err.to_string().contains("timed out")
-          || err.to_string().contains("temporary failure")
-          || err.to_string().contains("dns")
+        if err_text_lower.contains("error sending request for url")
+          || err_text.contains("connection reset")
+          || err_text.contains("connection refused")
+          || err_text.contains("timed out")
+          || err_text.contains("temporary failure")
+          || err_text.contains("dns")
         {
           app.status_message = Some(
             "Temporary Spotify network error while polling playback; retrying automatically."
@@ -724,12 +806,12 @@ impl PlaybackNetwork for Network {
           return;
         }
 
-        if err.to_string().contains("504")
-          || err.to_string().contains("503")
-          || err.to_string().contains("502")
-          || err.to_string().contains("Gateway Timeout")
-          || err.to_string().contains("Service Unavailable")
-          || err.to_string().contains("Bad Gateway")
+        if err_text.contains("504")
+          || err_text.contains("503")
+          || err_text.contains("502")
+          || err_text.contains("Gateway Timeout")
+          || err_text.contains("Service Unavailable")
+          || err_text.contains("Bad Gateway")
         {
           app.status_message = Some(
             "Spotify server temporarily unavailable (5xx); retrying automatically.".to_string(),
@@ -740,7 +822,7 @@ impl PlaybackNetwork for Network {
         }
 
         // 404 = no active device/player; treat as idle, not an error
-        if err.to_string().contains("404") || err.to_string().contains("Not Found") {
+        if err_text.contains("404") || err_text.contains("Not Found") {
           app.current_playback_context = None;
           app.instant_since_last_current_playback_poll = Instant::now();
           app.is_fetching_current_playback = false;
@@ -1515,13 +1597,12 @@ impl PlaybackNetwork for Network {
     {
       let streaming_player = current_streaming_player(self).await;
       let is_native_transfer = if let Some(ref player) = streaming_player {
-        let native_name = player.device_name().to_lowercase();
+        let native_name = player.device_name();
         let app = self.app.lock().await;
         let matches_cached_device = app.devices.as_ref().is_some_and(|payload| {
-          payload
-            .devices
-            .iter()
-            .any(|d| d.id.as_ref() == Some(&device_id) && d.name.to_lowercase() == native_name)
+          payload.devices.iter().any(|d| {
+            d.id.as_ref() == Some(&device_id) && native_device_names_match(&d.name, native_name)
+          })
         });
         matches_cached_device || app.native_device_id.as_ref() == Some(&device_id)
       } else {
@@ -1530,25 +1611,34 @@ impl PlaybackNetwork for Network {
 
       if is_native_transfer {
         if let Some(ref player) = streaming_player {
-          let _ = player.transfer(None);
+          let activation_time = Instant::now();
+          let session_device_id = player.device_id();
+          info!(
+            "transferring to native streaming device selected_id={} session_device_id={} connected={} persist={}",
+            device_id,
+            session_device_id,
+            player.is_connected(),
+            persist_device_id
+          );
+          if let Err(error) = player.transfer(None) {
+            info!("native streaming direct transfer failed: {}", error);
+          }
           player.activate();
+          let persist_result = if persist_device_id {
+            self.client_config.set_device_id(device_id.clone()).err()
+          } else {
+            None
+          };
           let mut app = self.app.lock().await;
-          app.is_streaming_active = true;
-          app.native_activation_pending = true;
-          app.native_playback_origin = None;
-          // Drop the stale previous-device context so playback routing follows the
-          // native intent (is_streaming_active) until the next poll repopulates it
-          // — mirrors the non-native transfer branch below. Without this, the first
-          // play can leak to the official Spotify client / 404 (#282).
-          app.current_playback_context = None;
-          app.selected_sonos_room_uuid = None;
-          app.sonos_is_playing = None;
-          app.sonos_now_playing = None;
-          app.is_volume_change_in_flight = false;
-          app.pending_volume = None;
-          app.last_dispatched_volume = None;
-          app.last_device_activation = Some(Instant::now());
-          app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_secs(6);
+          mark_direct_native_transfer_started(&mut app, session_device_id, activation_time);
+          app.set_status_message(native_activation_status_message(player.device_name()), 4);
+          if let Some(error) = persist_result {
+            info!(
+              "failed to persist native streaming device selection: {}",
+              error
+            );
+            app.handle_error(anyhow!(error));
+          }
           return;
         }
       }
@@ -1693,6 +1783,14 @@ impl PlaybackNetwork for Network {
 
     if let Some(player) = current_streaming_player(self).await {
       let activation_time = Instant::now();
+      let session_device_id = player.device_id();
+      info!(
+        "auto-selecting native streaming device name='{}' session_device_id={} connected={} persist={}",
+        device_name,
+        session_device_id,
+        player.is_connected(),
+        persist_device_id
+      );
       let should_transfer = {
         let app = self.app.lock().await;
         let recent_activation = app
@@ -1703,28 +1801,29 @@ impl PlaybackNetwork for Network {
 
       {
         let mut app = self.app.lock().await;
-        app.is_streaming_active = true;
-        app.native_activation_pending = true;
-        app.last_device_activation = Some(activation_time);
-        app.instant_since_last_current_playback_poll = activation_time - Duration::from_secs(6);
+        mark_native_activation_started(&mut app, session_device_id.clone(), activation_time);
+        app.set_status_message(native_activation_status_message(&device_name), 4);
       }
 
       if should_transfer {
-        let _ = player.transfer(None);
+        info!("native streaming auto-select: issuing Spirc transfer before activate");
+        if let Err(error) = player.transfer(None) {
+          info!("native streaming auto-select transfer failed: {}", error);
+        }
+      } else {
+        info!("native streaming auto-select: recent/active activation present; skipping transfer");
       }
       player.activate();
 
       {
         let mut app = self.app.lock().await;
-        app.is_streaming_active = true;
-        app.native_activation_pending = false;
-        app.last_device_activation = Some(activation_time);
-        app.instant_since_last_current_playback_poll = activation_time - Duration::from_secs(6);
+        mark_native_activation_requested(&mut app, activation_time);
       }
 
-      for attempt in 0..2 {
+      const DEVICE_APPEARANCE_ATTEMPTS: usize = 8;
+      for attempt in 0..DEVICE_APPEARANCE_ATTEMPTS {
         if attempt > 0 {
-          tokio::time::sleep(Duration::from_millis(200)).await;
+          tokio::time::sleep(Duration::from_millis(250)).await;
         }
 
         match self
@@ -1732,33 +1831,71 @@ impl PlaybackNetwork for Network {
           .await
         {
           Ok(payload) => {
-            if let Some(device) = payload
-              .devices
-              .iter()
-              .find(|d| d.name.to_lowercase() == device_name.to_lowercase())
+            if let Some(device) =
+              native_device_confirmation(&payload, &device_name, &session_device_id)
             {
               if let Some(id) = &device.id {
+                info!(
+                  "native streaming device appeared in Spotify devices on attempt {}: id={} name='{}' active={}",
+                  attempt + 1,
+                  id,
+                  device.name,
+                  device.is_active
+                );
                 if persist_device_id {
                   let _ = self.client_config.set_device_id(id.clone());
                 }
                 let mut app = self.app.lock().await;
-                app.native_device_id = Some(id.clone());
+                mark_native_activation_confirmed(&mut app, id.clone());
                 return;
               }
             }
+            info!(
+              "native streaming device '{}' not present in Spotify devices on attempt {}; seen devices: {}",
+              device_name,
+              attempt + 1,
+              device_names_for_log(&payload)
+            );
           }
-          Err(_) => continue,
+          Err(error) => {
+            info!(
+              "failed to fetch Spotify devices while confirming native streaming auto-select on attempt {}: {}",
+              attempt + 1,
+              error
+            );
+            continue;
+          }
         }
       }
+
+      info!(
+        "native streaming device '{}' was not confirmed by Spotify devices after {} attempts; keeping session_device_id={} as native target and activation pending",
+        device_name,
+        DEVICE_APPEARANCE_ATTEMPTS,
+        session_device_id
+      );
+      let mut app = self.app.lock().await;
+      app.set_status_message(
+        format!(
+          "Native Spotify device not confirmed yet; using local session id for {device_name}"
+        ),
+        8,
+      );
+    } else {
+      info!(
+        "native streaming auto-select requested for '{}' but no streaming player is available",
+        device_name
+      );
+      let mut app = self.app.lock().await;
+      app.set_status_message("Native streaming player is not available", 6);
     }
   }
 
   async fn ensure_playback_continues(&mut self, previous_track_id: String) {
-    #[cfg(feature = "streaming")]
-    if is_native_streaming_active_for_playback(self).await {
-      // Native player handles queue automatically
-      return;
-    }
+    // Native streaming normally advances by itself, but librespot can report a
+    // stopped EndOfTrack event after single-item direct loads. Keep the same
+    // recovery heuristic enabled for native so playlist/saved-track playback
+    // can advance instead of stopping after one song.
 
     // Check if we are paused/stopped
     let context = self
@@ -1879,6 +2016,13 @@ mod tests {
   use rspotify::model::{
     artist::SimplifiedArtist, idtypes::TrackId, track::FullTrack, SimplifiedAlbum,
   };
+  #[cfg(feature = "streaming")]
+  use rspotify::model::{
+    context::{Actions, CurrentPlaybackContext},
+    device::Device,
+    enums::{CurrentlyPlayingType, RepeatState},
+    DeviceType,
+  };
   use rspotify::prelude::Id;
   use std::collections::HashMap;
 
@@ -1915,6 +2059,37 @@ mod tests {
       track_number: 1,
       r#type: rspotify::model::Type::Track,
     })
+  }
+
+  #[cfg(feature = "streaming")]
+  #[allow(deprecated)]
+  fn spotify_device(id: &str, name: &str, is_active: bool) -> Device {
+    Device {
+      id: Some(id.to_string()),
+      is_active,
+      is_private_session: false,
+      is_restricted: false,
+      name: name.to_string(),
+      _type: DeviceType::Computer,
+      volume_percent: Some(50),
+    }
+  }
+
+  #[cfg(feature = "streaming")]
+  #[allow(deprecated)]
+  fn stale_playback_context() -> CurrentPlaybackContext {
+    CurrentPlaybackContext {
+      device: spotify_device("old-device", "Old Device", true),
+      repeat_state: RepeatState::Off,
+      shuffle_state: false,
+      context: None,
+      timestamp: chrono::Utc::now(),
+      progress: None,
+      is_playing: true,
+      item: Some(full_track("0000000000000000000001", "Old Track")),
+      currently_playing_type: CurrentlyPlayingType::Track,
+      actions: Actions::default(),
+    }
   }
 
   #[test]
@@ -2016,6 +2191,156 @@ mod tests {
       &item,
       Some("0000000000000000000002")
     ));
+  }
+
+  #[cfg(feature = "streaming")]
+  fn test_app() -> crate::core::app::App {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    crate::core::app::App::new(
+      tx,
+      crate::core::user_config::UserConfig::new(),
+      std::time::SystemTime::now(),
+    )
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn device_names_for_log_joins_without_trailing_separator() {
+    let payload = DevicePayload {
+      devices: vec![
+        spotify_device("device-a", "spotatui", false),
+        spotify_device("device-b", "Kitchen", true),
+      ],
+    };
+
+    assert_eq!(device_names_for_log(&payload), "spotatui, Kitchen");
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_device_names_match_without_allocating_for_exact_or_ascii_case() {
+    assert!(native_device_names_match("spotatui", "spotatui"));
+    assert!(native_device_names_match("Spotatui", "spotatui"));
+    assert!(native_device_names_match("Spötatui", "spötatui"));
+    assert!(!native_device_names_match("Other", "spotatui"));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_status_message_names_device() {
+    assert_eq!(
+      native_activation_status_message("spotatui"),
+      "Activating native Spotify device: spotatui"
+    );
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_start_stores_session_device_id_while_pending() {
+    let mut app = test_app();
+    let activation_time = Instant::now();
+
+    mark_native_activation_started(&mut app, "session-device-id".to_string(), activation_time);
+
+    assert!(app.is_streaming_active);
+    assert!(app.native_activation_pending);
+    assert_eq!(app.native_device_id.as_deref(), Some("session-device-id"));
+    assert_eq!(app.last_device_activation, Some(activation_time));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_confirmation_replaces_session_id_and_clears_pending() {
+    let mut app = test_app();
+    let activation_time = Instant::now();
+    mark_native_activation_started(&mut app, "session-device-id".to_string(), activation_time);
+
+    mark_native_activation_confirmed(&mut app, "spotify-web-api-device-id".to_string());
+
+    assert!(app.is_streaming_active);
+    assert!(!app.native_activation_pending);
+    assert_eq!(
+      app.native_device_id.as_deref(),
+      Some("spotify-web-api-device-id")
+    );
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_request_keeps_pending_state_until_device_confirmation() {
+    let mut app = test_app();
+    let activation_time = Instant::now();
+    mark_native_activation_started(&mut app, "session-device-id".to_string(), activation_time);
+
+    mark_native_activation_requested(&mut app, activation_time);
+
+    assert!(app.is_streaming_active);
+    assert!(app.native_activation_pending);
+    assert_eq!(app.native_device_id.as_deref(), Some("session-device-id"));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn direct_native_transfer_resets_stale_context_and_sonos_state() {
+    let mut app = test_app();
+    let activation_time = Instant::now();
+    app.current_playback_context = Some(stale_playback_context());
+    app.selected_sonos_room_uuid = Some("sonos-room".to_string());
+    app.sonos_is_playing = Some(true);
+    app.pending_volume = Some(42);
+    app.last_dispatched_volume = Some(42);
+    app.is_volume_change_in_flight = true;
+    app.native_playback_origin = Some(NativePlaybackOrigin::Context);
+
+    mark_direct_native_transfer_started(&mut app, "session-device-id".to_string(), activation_time);
+
+    assert!(app.is_streaming_active);
+    assert!(app.native_activation_pending);
+    assert_eq!(app.native_device_id.as_deref(), Some("session-device-id"));
+    assert_eq!(app.last_device_activation, Some(activation_time));
+    assert!(app.current_playback_context.is_none());
+    assert!(app.selected_sonos_room_uuid.is_none());
+    assert!(app.sonos_is_playing.is_none());
+    assert!(app.pending_volume.is_none());
+    assert!(app.last_dispatched_volume.is_none());
+    assert!(!app.is_volume_change_in_flight);
+    assert!(app.native_playback_origin.is_none());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_device_confirmation_prefers_session_device_id_over_same_name() {
+    let payload = DevicePayload {
+      devices: vec![
+        spotify_device("same-name-device", "spotatui", true),
+        spotify_device("session-device-id", "renamed spotatui", false),
+      ],
+    };
+
+    let confirmed = native_device_confirmation(&payload, "spotatui", "session-device-id");
+
+    assert_eq!(
+      confirmed.and_then(|device| device.id.as_deref()),
+      Some("session-device-id")
+    );
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_device_confirmation_prefers_active_same_name_when_session_id_absent() {
+    let payload = DevicePayload {
+      devices: vec![
+        spotify_device("stale-same-name", "spotatui", false),
+        spotify_device("active-same-name", "SPOTATUI", true),
+      ],
+    };
+
+    let confirmed = native_device_confirmation(&payload, "spotatui", "session-device-id");
+
+    assert_eq!(
+      confirmed.and_then(|device| device.id.as_deref()),
+      Some("active-same-name")
+    );
   }
 
   #[cfg(feature = "streaming")]

@@ -32,12 +32,8 @@ use crate::core::config::ClientConfig;
 use crate::core::user_config::{
   validate_tick_rate_milliseconds, StartupBehavior, UserConfig, UserConfigPaths,
 };
-#[cfg(feature = "discord-rpc")]
-use crate::infra::discord_rpc;
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 use crate::infra::macos_media;
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-use crate::infra::mpris;
 #[cfg(feature = "streaming")]
 use crate::infra::network::requests::spotify_get_typed_compat_for_with_refresh;
 use crate::infra::network::{IoEvent, Network};
@@ -47,7 +43,7 @@ use crate::tui::banner::BANNER;
 
 use anyhow::{anyhow, Result};
 use backtrace::Backtrace;
-use clap::{Arg, ArgMatches, Command as ClapApp};
+use clap::{Arg, Command as ClapApp};
 use clap_complete::{generate, Shell};
 use log::info;
 #[cfg(feature = "streaming")]
@@ -67,14 +63,6 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-#[cfg(feature = "discord-rpc")]
-type DiscordRpcHandle = Option<discord_rpc::DiscordRpcManager>;
-#[cfg(not(feature = "discord-rpc"))]
-type DiscordRpcHandle = Option<()>;
-
-#[cfg(feature = "discord-rpc")]
-const DEFAULT_DISCORD_CLIENT_ID: &str = "1464235043462447166";
-
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 #[derive(Default, PartialEq)]
 struct MacosMetadata {
@@ -84,38 +72,29 @@ struct MacosMetadata {
   duration_ms: u32,
   art_url: Option<String>,
 }
-#[cfg(feature = "discord-rpc")]
-fn resolve_discord_app_id(user_config: &UserConfig) -> Option<String> {
-  std::env::var("SPOTATUI_DISCORD_APP_ID")
-    .ok()
-    .filter(|value| !value.trim().is_empty())
-    .or_else(|| user_config.behavior.discord_rpc_client_id.clone())
-    .or_else(|| Some(DEFAULT_DISCORD_CLIENT_ID.to_string()))
-}
-
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 fn update_macos_metadata(
   manager: &macos_media::MacMediaManager,
   last_metadata: &mut Option<MacosMetadata>,
   app: &App,
 ) {
-  if let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) {
+  if let Some(metadata) = crate::infra::media_metadata::current_playback_metadata(app) {
     let new_metadata = MacosMetadata {
-      title: snapshot.metadata.title.clone(),
-      artists: snapshot.metadata.artists.clone(),
-      album: snapshot.metadata.album.clone(),
-      duration_ms: snapshot.metadata.duration_ms,
-      art_url: snapshot.metadata.image_url.clone(),
+      title: metadata.title,
+      artists: metadata.artists,
+      album: metadata.album,
+      duration_ms: metadata.duration_ms,
+      art_url: metadata.image_url,
     };
 
     // Only update if metadata changed to avoid repeated artwork fetches.
     if last_metadata.as_ref() != Some(&new_metadata) {
       manager.set_metadata(
-        &snapshot.metadata.title,
-        &snapshot.metadata.artists,
-        &snapshot.metadata.album,
-        snapshot.metadata.duration_ms,
-        snapshot.metadata.image_url,
+        &new_metadata.title,
+        &new_metadata.artists,
+        &new_metadata.album,
+        new_metadata.duration_ms,
+        new_metadata.art_url.clone(),
       );
       *last_metadata = Some(new_metadata);
     }
@@ -416,109 +395,6 @@ fn install_panic_hook() {
   }));
 }
 
-#[cfg(feature = "self-update")]
-fn add_self_update_cli(clap_app: ClapApp) -> ClapApp {
-  clap_app
-    .arg(
-      Arg::new("no-update")
-        .short('U')
-        .long("no-update")
-        .action(clap::ArgAction::SetTrue)
-        .help("Skip the automatic update check on startup"),
-    )
-    .subcommand(
-      ClapApp::new("update")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Check for and install updates")
-        .arg(
-          Arg::new("install")
-            .short('i')
-            .long("install")
-            .action(clap::ArgAction::SetTrue)
-            .help("Install the update if available"),
-        ),
-    )
-}
-
-#[cfg(not(feature = "self-update"))]
-fn add_self_update_cli(clap_app: ClapApp) -> ClapApp {
-  clap_app
-}
-
-#[cfg(feature = "self-update")]
-fn handle_self_update_command(matches: &ArgMatches) -> Result<bool> {
-  if let Some(update_matches) = matches.subcommand_matches("update") {
-    let do_install = update_matches.get_flag("install");
-    cli::check_for_update(do_install)?;
-    return Ok(true);
-  }
-
-  Ok(false)
-}
-
-#[cfg(not(feature = "self-update"))]
-fn handle_self_update_command(_matches: &ArgMatches) -> Result<bool> {
-  Ok(false)
-}
-
-#[cfg(feature = "self-update")]
-async fn run_auto_update(matches: &ArgMatches, user_config: &UserConfig) {
-  if matches.subcommand_name().is_some()
-    || std::env::var_os("SPOTATUI_SKIP_UPDATE").is_some()
-    || matches.get_flag("no-update")
-    || user_config.behavior.disable_auto_update
-  {
-    return;
-  }
-
-  println!("Checking for updates...");
-  // Must use spawn_blocking because self_update uses reqwest::blocking internally,
-  // which creates its own tokio runtime and panics if called from an async context.
-  let delay_secs =
-    crate::core::user_config::parse_update_delay_secs(&user_config.behavior.auto_update_delay)
-      .unwrap_or(0);
-  let update_result = tokio::task::spawn_blocking(move || cli::install_update_silent(delay_secs))
-    .await
-    .ok()
-    .and_then(|r| r.ok());
-
-  match update_result {
-    Some(cli::UpdateOutcome::Installed(new_version)) => {
-      println!("Updated to v{}! Restarting...", new_version);
-      // Re-exec the current binary with the same args, skipping the update check.
-      let exe = std::env::current_exe().expect("failed to get current executable path");
-      let args: Vec<String> = std::env::args().skip(1).collect();
-      let status = std::process::Command::new(&exe)
-        .args(&args)
-        .env("SPOTATUI_SKIP_UPDATE", "1")
-        .status();
-      match status {
-        Ok(exit_status) => std::process::exit(exit_status.code().unwrap_or(0)),
-        Err(e) => {
-          eprintln!("Failed to restart after update: {}", e);
-          eprintln!("Please restart spotatui manually.");
-          std::process::exit(1);
-        }
-      }
-    }
-    Some(cli::UpdateOutcome::Pending {
-      version,
-      secs_remaining,
-    }) => {
-      println!(
-        "Update v{} detected — will install in {}. Run `spotatui update --install` to update now.",
-        version,
-        crate::core::user_config::format_update_delay_secs(secs_remaining)
-      );
-    }
-    // Up-to-date, check failed, or no update — continue normally.
-    _ => {}
-  }
-}
-
-#[cfg(not(feature = "self-update"))]
-async fn run_auto_update(_matches: &ArgMatches, _user_config: &UserConfig) {}
-
 pub async fn run() -> Result<()> {
   setup_logging()?;
   info!("spotatui {} starting up", env!("CARGO_PKG_VERSION"));
@@ -528,8 +404,7 @@ pub async fn run() -> Result<()> {
   install_panic_hook();
   info!("panic hook configured");
 
-  let mut clap_app = add_self_update_cli(
-    ClapApp::new(env!("CARGO_PKG_NAME"))
+  let mut clap_app = ClapApp::new(env!("CARGO_PKG_NAME"))
     .version(env!("CARGO_PKG_VERSION"))
     .author(env!("CARGO_PKG_AUTHORS"))
     .about(env!("CARGO_PKG_DESCRIPTION"))
@@ -544,8 +419,7 @@ pub async fn run() -> Result<()> {
         .long("tick-rate")
         .help("Set the normal UI tick rate in milliseconds.")
         .long_help(
-          "Specify the normal UI tick rate in milliseconds. Lower values refresh non-animated \
-screens more often and cost more CPU. Animation-heavy views keep their separate animation tick rate.",
+          "Specify the UI tick rate in milliseconds. Lower values refresh screens more often and cost more CPU.",
         ),
     )
     .arg(
@@ -572,8 +446,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     .subcommand(cli::play_subcommand())
     .subcommand(cli::list_subcommand())
     .subcommand(cli::history_subcommand())
-    .subcommand(cli::search_subcommand()),
-  );
+    .subcommand(cli::search_subcommand());
 
   let matches = clap_app.clone().get_matches();
 
@@ -591,18 +464,11 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     return Ok(());
   }
 
-  // Handle self-update command (doesn't need Spotify auth)
-  if handle_self_update_command(&matches)? {
-    return Ok(());
-  }
-
   if let Some(history_matches) = matches.subcommand_matches("history") {
     println!("{}", cli::handle_history_matches(history_matches)?);
     return Ok(());
   }
 
-  // Auto-update on launch: silently check, download, install, and restart.
-  // Skip if a CLI subcommand is active or SPOTATUI_SKIP_UPDATE is set (prevents restart loops).
   let mut user_config = UserConfig::new();
   if let Some(config_file_path) = matches.get_one::<String>("config") {
     let config_file_path = PathBuf::from(config_file_path);
@@ -611,8 +477,6 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
   }
   user_config.load_config()?;
   info!("user config loaded successfully");
-
-  run_auto_update(&matches, &user_config).await;
 
   let initial_shuffle_enabled = user_config.behavior.shuffle_enabled;
   let initial_startup_behavior = user_config.behavior.startup_behavior;
@@ -658,83 +522,6 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     }
   }
 
-  // Prompt for global song count opt-in if missing (only for interactive TUI, not CLI)
-  // Keep this after client setup so first-run UX asks for auth mode first.
-  if matches.subcommand_name().is_none() {
-    let config_paths_check = match &user_config.path_to_config {
-      Some(path) => path,
-      None => {
-        user_config.get_or_build_paths()?;
-        user_config.path_to_config.as_ref().unwrap()
-      }
-    };
-
-    let should_prompt = if config_paths_check.config_file_path.exists() {
-      let config_string = fs::read_to_string(&config_paths_check.config_file_path)?;
-      config_string.trim().is_empty() || !config_string.contains("enable_global_song_count")
-    } else {
-      let client_yml_path = config_paths_check
-        .config_file_path
-        .parent()
-        .map(|p| p.join("client.yml"));
-      client_yml_path.is_some_and(|p| p.exists())
-    };
-
-    if should_prompt {
-      println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      println!("Global Song Counter");
-      println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      println!("\nspotatui can contribute to a global counter showing total");
-      println!("songs played by all users worldwide.");
-      println!("\nPrivacy: This feature is completely anonymous.");
-      println!("• No personal information is collected");
-      println!("• No song names, artists, or listening history");
-      println!("• Only a simple increment when a new song starts");
-      println!("\nWould you like to participate? (Y/n): ");
-
-      let mut input = String::new();
-      io::stdin().read_line(&mut input)?;
-      let input = input.trim().to_lowercase();
-
-      let enable = input.is_empty() || input == "y" || input == "yes";
-      user_config.behavior.enable_global_song_count = enable;
-
-      let config_yml = if config_paths_check.config_file_path.exists() {
-        fs::read_to_string(&config_paths_check.config_file_path).unwrap_or_default()
-      } else {
-        String::new()
-      };
-
-      let mut config: serde_yaml::Value = if config_yml.trim().is_empty() {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-      } else {
-        serde_yaml::from_str(&config_yml)?
-      };
-
-      if let serde_yaml::Value::Mapping(ref mut map) = config {
-        let behavior = map
-          .entry(serde_yaml::Value::String("behavior".to_string()))
-          .or_insert(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-
-        if let serde_yaml::Value::Mapping(ref mut behavior_map) = behavior {
-          behavior_map.insert(
-            serde_yaml::Value::String("enable_global_song_count".to_string()),
-            serde_yaml::Value::Bool(enable),
-          );
-        }
-      }
-
-      let updated_config = serde_yaml::to_string(&config)?;
-      fs::write(&config_paths_check.config_file_path, updated_config)?;
-
-      if enable {
-        println!("Thank you for participating!\n");
-      } else {
-        println!("Opted out. You can change this anytime in ~/.config/spotatui/config.yml\n");
-      }
-    }
-  }
-
   let config_paths = client_config.get_or_build_paths()?;
   let authenticated = auth::authenticate_with_fallback(&mut client_config, &config_paths).await?;
   let spotify = authenticated.spotify;
@@ -776,7 +563,6 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
   // Launch the UI (async)
   } else {
     info!("launching interactive terminal ui");
-    crate::infra::history::spawn_history_collector(Arc::clone(&app));
     #[cfg(feature = "streaming")]
     let (streaming_supported_for_account, streaming_startup_status_message) =
       if client_config.enable_streaming {
@@ -880,117 +666,43 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     // Create shared atomic for real-time position updates from native player
     // This avoids lock contention - the player event handler can update position
     // without needing to acquire the app mutex
-    #[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
+    #[cfg(feature = "streaming")]
     let shared_position = Arc::new(AtomicU64::new(0));
     #[cfg(feature = "streaming")]
     let shared_position_for_events = Arc::clone(&shared_position);
     #[cfg(feature = "streaming")]
     let shared_position_for_ui = Arc::clone(&shared_position);
 
-    // Create shared atomic for playing state (lock-free for MPRIS toggle)
-    #[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
+    // Create shared atomic for playing state used by native/media-control handlers.
+    #[cfg(feature = "streaming")]
     let shared_is_playing = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(feature = "streaming")]
     let shared_is_playing_for_events = Arc::clone(&shared_is_playing);
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
-    let shared_is_playing_for_mpris = Arc::clone(&shared_is_playing);
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
-    let shared_position_for_mpris = Arc::clone(&shared_position);
     #[cfg(all(feature = "macos-media", target_os = "macos"))]
     let shared_is_playing_for_macos = Arc::clone(&shared_is_playing);
     #[cfg(feature = "streaming")]
     let (streaming_recovery_tx, streaming_recovery_rx) =
       tokio::sync::mpsc::unbounded_channel::<player::StreamingRecoveryRequest>();
 
-    // Initialize MPRIS D-Bus integration for desktop media control
-    // This registers spotatui as a controllable media player on the session bus
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
-    let mpris_manager: Option<Arc<mpris::MprisManager>> = match mpris::MprisManager::new() {
-      Ok(mgr) => {
-        info!("mpris d-bus interface registered - media keys and playerctl enabled");
-        Some(Arc::new(mgr))
-      }
-      Err(e) => {
-        info!(
-          "failed to initialize mpris: {} - media key control disabled",
-          e
-        );
-        None
-      }
-    };
-
-    // Store MPRIS manager reference in App for emitting Seeked signals from native seeks
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
-    {
-      let mut app_mut = app.lock().await;
-      app_mut.mpris_manager = mpris_manager.clone();
-    }
-
-    // Initialize macOS Now Playing integration for media key control
-    // This registers with MPRemoteCommandCenter for media key events
+    // Initialize macOS Now Playing integration for media key control.
+    // Keep this independent from native streaming: if librespot fails or the user
+    // selects Sonos/external Spotify Connect, media keys should still dispatch
+    // through the normal playback path.
     #[cfg(all(feature = "macos-media", target_os = "macos"))]
     let macos_media_manager: Option<Arc<macos_media::MacMediaManager>> =
-      if streaming_player.is_some() {
-        match macos_media::MacMediaManager::new() {
-          Ok(mgr) => {
-            info!("macos now playing interface registered - media keys enabled");
-            Some(Arc::new(mgr))
-          }
-          Err(e) => {
-            info!(
-              "failed to initialize macos media control: {} - media keys disabled",
-              e
-            );
-            None
-          }
+      match macos_media::MacMediaManager::new() {
+        Ok(mgr) => {
+          info!("macos now playing interface registered - media keys enabled");
+          Some(Arc::new(mgr))
         }
-      } else {
-        None
-      };
-
-    #[cfg(feature = "discord-rpc")]
-    let discord_rpc_manager: DiscordRpcHandle = if user_config.behavior.enable_discord_rpc {
-      match resolve_discord_app_id(&user_config)
-        .and_then(|app_id| discord_rpc::DiscordRpcManager::new(app_id).ok())
-      {
-        Some(mgr) => {
-          info!("discord rich presence enabled");
-          Some(mgr)
-        }
-        None => {
-          info!("discord rich presence failed to initialize");
+        Err(e) => {
+          info!(
+            "failed to initialize macos media control: {} - media keys disabled",
+            e
+          );
           None
         }
-      }
-    } else {
-      info!("discord rich presence disabled");
-      None
-    };
-    #[cfg(not(feature = "discord-rpc"))]
-    let discord_rpc_manager: DiscordRpcHandle = None;
-
-    // Spawn MPRIS event handler to process external control requests (media keys, playerctl)
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
-    if let Some(ref mpris) = mpris_manager {
-      if let Some(event_rx) = mpris.take_event_rx() {
-        #[cfg(feature = "streaming")]
-        let streaming_player_for_mpris = streaming_player.clone();
-        let mpris_for_seek = Arc::clone(mpris);
-        let app_for_mpris = Arc::clone(&app);
-        tokio::spawn(async move {
-          handle_mpris_events(
-            event_rx,
-            #[cfg(feature = "streaming")]
-            streaming_player_for_mpris,
-            shared_is_playing_for_mpris,
-            shared_position_for_mpris,
-            mpris_for_seek,
-            app_for_mpris,
-          )
-          .await;
-        });
-      }
-    }
+      };
 
     // Spawn macOS media event handler to process external control requests (media keys, Control Center)
     #[cfg(all(feature = "macos-media", target_os = "macos"))]
@@ -1022,17 +734,9 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
       });
     }
 
-    // Clone MPRIS manager for player event handler
-    #[cfg(all(feature = "streaming", feature = "mpris", target_os = "linux"))]
-    let mpris_for_events = mpris_manager.clone();
-
     // Clone macOS media manager for player event handler
     #[cfg(all(feature = "macos-media", target_os = "macos"))]
     let macos_media_for_events = macos_media_manager.clone();
-
-    // Clone MPRIS manager for UI loop (to update status on device changes)
-    #[cfg(all(feature = "mpris", target_os = "linux"))]
-    let mpris_for_ui = mpris_manager.clone();
 
     // Spawn player event listener (updates app state from native player events)
     #[cfg(feature = "streaming")]
@@ -1043,8 +747,6 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         shared_position: shared_position_for_events,
         shared_is_playing: shared_is_playing_for_events,
         recovery_tx: streaming_recovery_tx.clone(),
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        mpris_manager: mpris_for_events,
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         macos_media_manager: macos_media_for_events,
       });
@@ -1060,8 +762,6 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         recovery_tx: streaming_recovery_tx.clone(),
         client_config: client_config.clone(),
         redirect_uri: selected_redirect_uri.clone(),
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        mpris_manager: mpris_manager.clone(),
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         macos_media_manager: macos_media_manager.clone(),
       });
@@ -1083,9 +783,9 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         crate::core::playback_target::parse_sonos_persisted_id(device_id).is_some()
       });
 
-      if let Some(device_id) = saved_sonos_device_id.clone() {
+      if let Some(device_id) = saved_sonos_device_id.as_ref() {
         network
-          .handle_network_event(IoEvent::TransferPlaybackToDevice(device_id, true))
+          .handle_network_event(IoEvent::TransferPlaybackToDevice(device_id.clone(), true))
           .await;
       }
 
@@ -1094,19 +794,11 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
       if saved_sonos_device_id.is_none() {
         if let Some(device_name) = streaming_device_name {
           let saved_device_id = network.client_config.device_id.clone();
-          let mut devices_snapshot = None;
-
-          if let Ok(devices) = network
+          let devices_snapshot = network
             .spotify_get_typed::<rspotify::model::device::DevicePayload>("me/player/devices", &[])
             .await
-          {
-            let devices_vec = devices.devices;
-            let mut app = network.app.lock().await;
-            app.devices = Some(rspotify::model::device::DevicePayload {
-              devices: devices_vec.clone(),
-            });
-            devices_snapshot = Some(devices_vec);
-          }
+            .ok()
+            .map(|devices| devices.devices);
 
           let startup_decision = startup_device_decision(
             initial_startup_behavior,
@@ -1115,9 +807,14 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
             &device_name,
           );
 
-          if let Some(message) = startup_decision.status_message {
+          if devices_snapshot.is_some() || startup_decision.status_message.is_some() {
             let mut app = network.app.lock().await;
-            app.set_status_message(message, 5);
+            if let Some(devices) = devices_snapshot {
+              app.devices = Some(rspotify::model::device::DevicePayload { devices });
+            }
+            if let Some(message) = startup_decision.status_message {
+              app.set_status_message(message, 5);
+            }
           }
 
           if let Some(event) = startup_decision.event {
@@ -1151,17 +848,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     let shared_pos_for_start_ui: Option<Arc<AtomicU64>> = Some(shared_position_for_ui);
     #[cfg(not(feature = "streaming"))]
     let shared_pos_for_start_ui: Option<Arc<AtomicU64>> = None;
-    crate::tui::runner::start_ui(
-      user_config,
-      &cloned_app,
-      shared_pos_for_start_ui,
-      #[cfg(all(feature = "mpris", target_os = "linux"))]
-      mpris_for_ui,
-      #[cfg(not(all(feature = "mpris", target_os = "linux")))]
-      None,
-      discord_rpc_manager,
-    )
-    .await?;
+    crate::tui::runner::start_ui(user_config, &cloned_app, shared_pos_for_start_ui).await?;
   }
 
   Ok(())
@@ -1178,206 +865,24 @@ async fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Ne
       }
       Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
     }
-    network.process_party_messages().await;
   }
 }
 
-/// Handle MPRIS events from external clients (media keys, playerctl, etc.)
-/// Routes to native streaming player when available, or dispatches IoEvents as fallback
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-async fn handle_mpris_events(
-  mut event_rx: tokio::sync::mpsc::UnboundedReceiver<mpris::MprisEvent>,
-  #[cfg(feature = "streaming")] streaming_player: Option<Arc<player::StreamingPlayer>>,
-  shared_is_playing: Arc<std::sync::atomic::AtomicBool>,
-  shared_position: Arc<AtomicU64>,
-  mpris_manager: Arc<mpris::MprisManager>,
-  app: Arc<Mutex<App>>,
-) {
-  use mpris::MprisEvent;
-  #[cfg(feature = "streaming")]
-  use std::sync::atomic::Ordering;
-
-  while let Some(event) = event_rx.recv().await {
-    match event {
-      MprisEvent::PlayPause => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          if shared_is_playing.load(Ordering::Relaxed) {
-            player.pause();
-          } else {
-            player.play();
-          }
-          continue;
-        }
-        // Fallback: dispatch IoEvent
-        let mut app_lock = app.lock().await;
-        let is_playing = app_lock.native_is_playing.unwrap_or_else(|| {
-          app_lock
-            .current_playback_context
-            .as_ref()
-            .map(|c| c.is_playing)
-            .unwrap_or(false)
-        });
-        if is_playing {
-          app_lock.dispatch(IoEvent::PausePlayback);
-        } else {
-          app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
-        }
-      }
-      MprisEvent::Play => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          player.play();
-          continue;
-        }
-        let mut app_lock = app.lock().await;
-        app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
-      }
-      MprisEvent::Pause => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          player.pause();
-          continue;
-        }
-        let mut app_lock = app.lock().await;
-        app_lock.dispatch(IoEvent::PausePlayback);
-      }
-      MprisEvent::Next => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          player.activate();
-          player.next();
-          player.play();
-          continue;
-        }
-        let mut app_lock = app.lock().await;
-        app_lock.dispatch(IoEvent::NextTrack);
-      }
-      MprisEvent::Previous => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          player.activate();
-          player.prev();
-          player.play();
-          continue;
-        }
-        let mut app_lock = app.lock().await;
-        app_lock.dispatch(IoEvent::PreviousTrack);
-      }
-      MprisEvent::Stop => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          player.stop();
-          continue;
-        }
-        let mut app_lock = app.lock().await;
-        app_lock.dispatch(IoEvent::PausePlayback);
-      }
-      MprisEvent::Seek(offset_micros) => {
-        // MPRIS sends relative offset in microseconds (can be negative for rewind)
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          let current_ms = shared_position.load(Ordering::Relaxed) as i64;
-          let offset_ms = offset_micros / 1000;
-          let new_position_ms = (current_ms + offset_ms).max(0) as u32;
-          player.seek(new_position_ms);
-          shared_position.store(new_position_ms as u64, Ordering::Relaxed);
-          if let Ok(mut app_lock) = app.try_lock() {
-            app_lock.song_progress_ms = new_position_ms as u128;
-          }
-          mpris_manager.emit_seeked(new_position_ms as u64);
-          continue;
-        }
-        // Fallback: read current position from app, dispatch Seek IoEvent
-        let mut app_lock = app.lock().await;
-        let current_ms = app_lock.song_progress_ms as i64;
-        let offset_ms = offset_micros / 1000;
-        let new_position_ms = (current_ms + offset_ms).max(0) as u32;
-        app_lock.song_progress_ms = new_position_ms as u128;
-        app_lock.dispatch(IoEvent::Seek(new_position_ms));
-        drop(app_lock);
-        mpris_manager.emit_seeked(new_position_ms as u64);
-      }
-      MprisEvent::SetPosition(position_micros) => {
-        // MPRIS SetPosition sends absolute position in microseconds
-        let new_position_ms = (position_micros / 1000).max(0) as u32;
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          player.seek(new_position_ms);
-          shared_position.store(new_position_ms as u64, Ordering::Relaxed);
-          if let Ok(mut app_lock) = app.try_lock() {
-            app_lock.song_progress_ms = new_position_ms as u128;
-          }
-          mpris_manager.emit_seeked(new_position_ms as u64);
-          continue;
-        }
-        // Fallback: dispatch Seek IoEvent
-        let mut app_lock = app.lock().await;
-        app_lock.song_progress_ms = new_position_ms as u128;
-        app_lock.dispatch(IoEvent::Seek(new_position_ms));
-        drop(app_lock);
-        mpris_manager.emit_seeked(new_position_ms as u64);
-      }
-      MprisEvent::SetShuffle(shuffle) => {
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          if let Err(e) = player.set_shuffle(shuffle) {
-            eprintln!("MPRIS: Failed to set shuffle: {}", e);
-          } else {
-            mpris_manager.set_shuffle(shuffle);
-            let mut app_lock = app.lock().await;
-            if let Some(ref mut ctx) = app_lock.current_playback_context {
-              ctx.shuffle_state = shuffle;
-            }
-            app_lock.user_config.behavior.shuffle_enabled = shuffle;
-          }
-          continue;
-        }
-        // Fallback: dispatch Shuffle IoEvent
-        mpris_manager.set_shuffle(shuffle);
-        let mut app_lock = app.lock().await;
-        if let Some(ref mut ctx) = app_lock.current_playback_context {
-          ctx.shuffle_state = shuffle;
-        }
-        app_lock.user_config.behavior.shuffle_enabled = shuffle;
-        app_lock.dispatch(IoEvent::Shuffle(shuffle));
-      }
-      MprisEvent::SetLoopStatus(loop_status) => {
-        use mpris::LoopStatusEvent;
-        use rspotify::model::enums::RepeatState;
-
-        let repeat_state = match loop_status {
-          LoopStatusEvent::None => RepeatState::Off,
-          LoopStatusEvent::Track => RepeatState::Track,
-          LoopStatusEvent::Playlist => RepeatState::Context,
-        };
-        #[cfg(feature = "streaming")]
-        if let Some(ref player) = streaming_player {
-          if let Err(e) = player.set_repeat_mode(repeat_state) {
-            eprintln!("MPRIS: Failed to set repeat mode: {}", e);
-          } else {
-            mpris_manager.set_loop_status(loop_status);
-            let mut app_lock = app.lock().await;
-            if let Some(ref mut ctx) = app_lock.current_playback_context {
-              ctx.repeat_state = repeat_state;
-            }
-          }
-          continue;
-        }
-        // Fallback: dispatch Repeat IoEvent
-        mpris_manager.set_loop_status(loop_status);
-        let mut app_lock = app.lock().await;
-        if let Some(ref mut ctx) = app_lock.current_playback_context {
-          ctx.repeat_state = repeat_state;
-        }
-        app_lock.dispatch(IoEvent::Repeat(repeat_state));
-      }
-    }
-  }
+#[cfg_attr(
+  not(all(feature = "macos-media", target_os = "macos")),
+  allow(dead_code)
+)]
+fn macos_media_should_use_native_streaming(
+  is_streaming_active: bool,
+  streaming_player_available: bool,
+) -> bool {
+  is_streaming_active && streaming_player_available
 }
 
-/// Handle macOS media events from external sources (media keys, Control Center, AirPods, etc.)
-/// Routes control requests to the native streaming player
+/// Handle macOS media events from external sources (media keys, Control Center, AirPods, etc.).
+/// Native streaming is used only when it is the active playback target; otherwise
+/// commands fall back to the normal app dispatch path, which covers Sonos and
+/// external Spotify Connect devices.
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 async fn handle_macos_media_events(
   mut event_rx: tokio::sync::mpsc::UnboundedReceiver<macos_media::MacMediaEvent>,
@@ -1388,47 +893,72 @@ async fn handle_macos_media_events(
   use std::sync::atomic::Ordering;
 
   while let Some(event) = event_rx.recv().await {
-    let Some(player) = player::active_streaming_player(&app).await else {
-      continue;
+    let native_player = {
+      let app_lock = app.lock().await;
+      let streaming_player = app_lock.streaming_player.clone();
+      macos_media_should_use_native_streaming(
+        app_lock.is_streaming_active,
+        streaming_player.is_some(),
+      )
+      .then_some(streaming_player)
+      .flatten()
     };
 
-    match event {
-      MacMediaEvent::PlayPause => {
-        // Toggle based on atomic state (lock-free, always up-to-date)
-        if shared_is_playing.load(Ordering::Relaxed) {
-          player.pause();
-        } else {
+    if let Some(player) = native_player {
+      match event {
+        MacMediaEvent::PlayPause => {
+          // Toggle based on atomic state (lock-free, always up-to-date)
+          if shared_is_playing.load(Ordering::Relaxed) {
+            player.pause();
+          } else {
+            player.play();
+          }
+        }
+        MacMediaEvent::Play => {
           player.play();
         }
+        MacMediaEvent::Pause => {
+          player.pause();
+        }
+        MacMediaEvent::Next => {
+          player.activate();
+          player.next();
+          // Keep Connect + audio state in sync.
+          player.play();
+        }
+        MacMediaEvent::Previous => {
+          player.activate();
+          player.prev();
+          // Keep Connect + audio state in sync.
+          player.play();
+        }
+        MacMediaEvent::Stop => {
+          player.stop();
+        }
       }
+      continue;
+    }
+
+    let mut app_lock = app.lock().await;
+    match event {
+      MacMediaEvent::PlayPause => app_lock.toggle_playback(),
       MacMediaEvent::Play => {
-        player.play();
+        app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
       }
-      MacMediaEvent::Pause => {
-        player.pause();
+      MacMediaEvent::Pause | MacMediaEvent::Stop => {
+        app_lock.dispatch(IoEvent::PausePlayback);
       }
-      MacMediaEvent::Next => {
-        player.activate();
-        player.next();
-        // Keep Connect + audio state in sync.
-        player.play();
-      }
-      MacMediaEvent::Previous => {
-        player.activate();
-        player.prev();
-        // Keep Connect + audio state in sync.
-        player.play();
-      }
-      MacMediaEvent::Stop => {
-        player.stop();
-      }
+      MacMediaEvent::Next => app_lock.next_track(),
+      MacMediaEvent::Previous => app_lock.previous_track(),
     }
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::{startup_device_decision, StartupDeviceEvent};
+  use super::{
+    macos_media_should_use_native_streaming, startup_device_decision, StartupDeviceEvent,
+  };
   use crate::core::user_config::StartupBehavior;
   use rspotify::model::{device::Device, DeviceType};
 
@@ -1522,6 +1052,14 @@ mod tests {
         persist_device_id: true,
       })
     );
+  }
+
+  #[test]
+  fn macos_media_uses_native_only_when_active_player_exists() {
+    assert!(macos_media_should_use_native_streaming(true, true));
+    assert!(!macos_media_should_use_native_streaming(true, false));
+    assert!(!macos_media_should_use_native_streaming(false, true));
+    assert!(!macos_media_should_use_native_streaming(false, false));
   }
 
   #[test]

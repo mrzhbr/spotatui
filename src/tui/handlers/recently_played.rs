@@ -46,19 +46,23 @@ pub fn handler(key: Key, app: &mut App) {
       }
     }
     Key::Char('s') => {
-      if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
-          if let Some(track_id) = &selected_track.track.id {
-            app.dispatch(IoEvent::ToggleSaveTrack(PlayableId::Track(
-              track_id.clone().into_static(),
-            )));
-          };
-        };
-      };
+      let playable_id = app
+        .recently_played
+        .result
+        .as_ref()
+        .and_then(|recently_played_result| {
+          recently_played_result.items.get(app.recently_played.index)
+        })
+        .and_then(|selected_track| selected_track.track.id.clone())
+        .map(|track_id| PlayableId::Track(track_id.into_static()));
+
+      if let Some(playable_id) = playable_id {
+        app.dispatch(IoEvent::ToggleSaveTrack(playable_id));
+      }
     }
     Key::Char('w') => open_add_to_playlist_for_selected_recent_track(app),
     Key::Enter => {
-      if let Some(recently_played_result) = &app.recently_played.result.clone() {
+      if let Some(recently_played_result) = app.recently_played.result.as_ref() {
         let track_uris: Vec<PlayableId<'static>> = recently_played_result
           .items
           .iter()
@@ -79,26 +83,41 @@ pub fn handler(key: Key, app: &mut App) {
       };
     }
     Key::Char('r') => {
-      if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
-          if let Some(track_id) = &selected_track.track.id {
-            app.recommendations_context = Some(RecommendationsContext::Song);
-            app.recommendations_seed = selected_track.track.name.clone();
-            app.get_recommendations_for_track_id(track_id.id().to_string());
-          };
-        };
-      };
+      let selected_track = app
+        .recently_played
+        .result
+        .as_ref()
+        .and_then(|recently_played_result| {
+          recently_played_result.items.get(app.recently_played.index)
+        })
+        .and_then(|selected_track| {
+          selected_track
+            .track
+            .id
+            .as_ref()
+            .map(|track_id| (selected_track.track.name.clone(), track_id.id().to_string()))
+        });
+
+      if let Some((track_name, track_id)) = selected_track {
+        app.recommendations_context = Some(RecommendationsContext::Song);
+        app.recommendations_seed = track_name;
+        app.get_recommendations_for_track_id(track_id);
+      }
     }
     _ if key == app.user_config.keys.add_item_to_queue => {
-      if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
-          if let Some(track_id) = &selected_track.track.id {
-            app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
-              track_id.clone().into_static(),
-            )));
-          };
-        };
-      };
+      let playable_id = app
+        .recently_played
+        .result
+        .as_ref()
+        .and_then(|recently_played_result| {
+          recently_played_result.items.get(app.recently_played.index)
+        })
+        .and_then(|selected_track| selected_track.track.id.clone())
+        .map(|track_id| PlayableId::Track(track_id.into_static()));
+
+      if let Some(playable_id) = playable_id {
+        app.dispatch(IoEvent::AddItemToQueue(playable_id));
+      }
     }
     _ => {}
   };

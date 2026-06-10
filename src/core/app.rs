@@ -1,9 +1,8 @@
 use crate::core::playback_target::{
-  spotify_target_from_device, PlaybackTarget, SonosNowPlaying, SonosRoom,
+  spotify_target_from_device, PlaybackTarget, PlaybackTargetRef, SonosNowPlaying, SonosRoom,
 };
 use crate::core::sort::{SortContext, SortField, SortOrder, SortState};
 use crate::core::user_config::{color_to_string, normalize_tick_rate_milliseconds, UserConfig};
-use crate::infra::network::sync::{PartySession, PartyStatus};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 use anyhow::anyhow;
@@ -29,7 +28,7 @@ use rspotify::{
 use serde::de::DeserializeOwned;
 use std::cell::Cell;
 use std::sync::mpsc::Sender;
-#[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
+#[cfg(feature = "streaming")]
 use std::sync::Arc;
 use std::{
   cmp::{max, min},
@@ -40,10 +39,9 @@ use std::{
 use arboard::Clipboard;
 use log::info;
 
-pub const LIBRARY_OPTIONS: [&str; 7] = [
+pub const LIBRARY_OPTIONS: [&str; 6] = [
   "Discover",
   "Recently Played",
-  "Friends",
   "Liked Songs",
   "Albums",
   "Artists",
@@ -216,7 +214,6 @@ pub struct PendingKeybindingPersist {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ActiveBlock {
-  Analysis,
   PlayBar,
   AlbumTracks,
   AlbumList,
@@ -241,14 +238,11 @@ pub enum ActiveBlock {
   MiniPlayer,
   Dialog(DialogContext),
 
-  AnnouncementPrompt,
   ExitPrompt,
   Settings,
   SortMenu,
   Queue,
-  Party,
   CreatePlaylistForm,
-  Friends,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -260,7 +254,6 @@ pub enum InputContext {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum RouteId {
-  Analysis,
   AlbumTracks,
   AlbumList,
   Artist,
@@ -280,78 +273,11 @@ pub enum RouteId {
   Recommendations,
   Dialog,
 
-  AnnouncementPrompt,
   ExitPrompt,
   Settings,
   HelpMenu,
   Queue,
-  Party,
   CreatePlaylist,
-  Friends,
-}
-
-// ── Friends feature ───────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-pub struct FriendEntry {
-  pub id: String,
-  pub name: String,
-  pub is_online: bool,
-  pub now_playing: Option<FriendNowPlaying>,
-  /// Total listening time in milliseconds (from spotatui.com)
-  #[allow(dead_code)]
-  pub listening_ms: u64,
-  /// Total number of listens tracked on spotatui.com
-  #[allow(dead_code)]
-  pub total_listens: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct FriendNowPlaying {
-  pub title: String,
-  pub artists: String,
-}
-
-/// A user returned from the username/code search.
-#[derive(Clone, Debug)]
-pub struct FriendSearchResult {
-  pub id: String,
-  pub name: String,
-  pub is_following: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub enum FriendFilter {
-  #[default]
-  All,
-  Online,
-}
-
-/// Which tab is active in the "Add Friend" dialog.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub enum FriendAddMode {
-  #[default]
-  Code,
-  Search,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum AnnouncementLevel {
-  Info,
-  Warning,
-  Critical,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct Announcement {
-  pub id: String,
-  pub title: String,
-  pub body: String,
-  pub level: AnnouncementLevel,
-  pub url: Option<String>,
-  pub received_at: Instant,
 }
 
 #[derive(Debug)]
@@ -541,13 +467,6 @@ pub struct Artist {
   pub artist_selected_block: ArtistBlock,
 }
 
-/// Spectrum data for local audio visualization
-#[derive(Clone, Default)]
-pub struct SpectrumData {
-  pub bands: [f32; 12],
-  pub peak: f32,
-}
-
 #[derive(Clone, PartialEq, Debug, Default)]
 pub enum LyricsStatus {
   #[default]
@@ -557,19 +476,12 @@ pub enum LyricsStatus {
   NotFound,
 }
 
+#[cfg_attr(not(feature = "streaming"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NativePlaybackOrigin {
   Context,
   #[default]
   RawList,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum NativeTrackKind {
-  #[default]
-  Track,
-  Episode,
 }
 
 /// Immediate track info from native player for instant UI updates
@@ -581,7 +493,6 @@ pub struct NativeTrackInfo {
   #[allow(dead_code)]
   pub album: String, // Reserved for future use (e.g., displaying album in playbar)
   pub duration_ms: u32,
-  pub kind: NativeTrackKind,
 }
 
 /// A node in the playlist folder hierarchy from Spotify's rootlist
@@ -734,8 +645,6 @@ pub struct App {
   pub last_dispatched_volume: Option<u8>,
   pub instant_since_last_current_playback_poll: Instant,
   navigation_stack: Vec<Route>,
-  pub spectrum_data: Option<SpectrumData>,
-  pub audio_capture_active: bool,
   pub home_scroll: u16,
   pub user_config: UserConfig,
   pub artists: Vec<FullArtist>,
@@ -832,12 +741,8 @@ pub struct App {
   pub terminal_input_caps: TerminalInputCapabilities,
   pub keybinding_runtime: KeybindingRuntimeState,
 
-  pub active_announcement: Option<Announcement>,
-  pub pending_announcements: Vec<Announcement>,
   pub lyrics: Option<Vec<(u128, String)>>,
   pub lyrics_status: LyricsStatus,
-  pub global_song_count: Option<u64>,
-  pub global_song_count_failed: bool,
   // Settings screen state
   pub settings_category: SettingsCategory,
   pub settings_items: Vec<SettingItem>,
@@ -859,9 +764,8 @@ pub struct App {
   pub native_is_playing: Option<bool>,
   /// Tracks whether the current native playback was started from a Spotify context
   /// or from a raw URI-list/native-only route.
+  #[cfg_attr(not(feature = "streaming"), allow(dead_code))]
   pub native_playback_origin: Option<NativePlaybackOrigin>,
-  /// Prevent idle/sleep during playback
-  pub keepawake: Option<keepawake::KeepAwake>,
   /// Timestamp of the last native device activation
   #[allow(dead_code)]
   pub last_device_activation: Option<Instant>,
@@ -891,24 +795,10 @@ pub struct App {
   pub artist_sort: SortState,
   /// Animation frame counter for the "Liked" heart flash effect (0-10)
   pub liked_song_animation_frame: Option<u8>,
-  /// Global animation tick counter, incremented every tick.
-  pub animation_tick: u64,
-  /// Last time the listening party host broadcast playback state.
-  pub last_party_sync_at: Instant,
   /// Ephemeral status message shown in the playbar
   pub status_message: Option<String>,
   /// When to clear the status message
   pub status_message_expires_at: Option<Instant>,
-  /// Listening party status
-  pub party_status: PartyStatus,
-  /// Active listening party session data
-  pub party_session: Option<PartySession>,
-  /// Input buffer for the party join code
-  pub party_input: Vec<char>,
-  /// Cursor position in party code input
-  pub party_input_idx: usize,
-  /// Input buffer for the required party guest name
-  pub party_join_name: Vec<char>,
   /// Pending track table selection to apply when new page loads
   pub pending_track_table_selection: Option<PendingTrackSelection>,
   /// Maps visible track table rows to source playlist item positions.
@@ -943,37 +833,6 @@ pub struct App {
   /// Reference to the native streaming player for direct control (bypasses event channel)
   #[cfg(feature = "streaming")]
   pub streaming_player: Option<Arc<crate::infra::player::StreamingPlayer>>,
-  /// Reference to MPRIS manager for emitting Seeked signals after native seeks
-  #[cfg(all(feature = "mpris", target_os = "linux"))]
-  pub mpris_manager: Option<Arc<crate::infra::mpris::MprisManager>>,
-
-  // Friends screen state
-  /// All friends fetched from spotatui.com (follows list)
-  pub friends: Vec<FriendEntry>,
-  /// Whether friends are currently loading from the API
-  pub friends_loading: bool,
-  /// Own friend code fetched from spotatui.com
-  pub friend_code: Option<String>,
-  /// Cursor position in the friends list
-  pub friend_selected_index: usize,
-  /// Active filter (All / Online)
-  pub friend_filter: FriendFilter,
-  /// Inline search / filter input on the Friends screen
-  pub friend_search_input: Vec<char>,
-  /// Whether the "Add Friend" overlay dialog is open
-  pub friend_add_dialog_visible: bool,
-  /// Which tab is active inside the add-friend dialog
-  pub friend_add_mode: FriendAddMode,
-  /// Input buffer for the "add by friend code" text field
-  pub friend_add_input: Vec<char>,
-  /// Input buffer for the "search by username" text field in the add dialog
-  pub friend_user_search_input: Vec<char>,
-  /// Results from searching users by name
-  pub friend_user_search_results: Vec<FriendSearchResult>,
-  /// Selected row in the user-search results list
-  pub friend_user_search_selected: usize,
-  /// Timestamp of the last time friends were refreshed (for periodic polling)
-  pub last_friends_refresh_at: Instant,
 
   // Create Playlist form state
   pub create_playlist_name: Vec<char>,
@@ -997,8 +856,6 @@ pub enum PendingTrackSelection {
 impl Default for App {
   fn default() -> Self {
     App {
-      spectrum_data: None,
-      audio_capture_active: false,
       album_table_context: AlbumTableContext::Full,
       album_list_index: 0,
       discover_selected_index: 0,
@@ -1105,12 +962,8 @@ impl Default for App {
       terminal_input_caps: TerminalInputCapabilities::default(),
       keybinding_runtime: KeybindingRuntimeState::default(),
 
-      active_announcement: None,
-      pending_announcements: Vec::new(),
       lyrics: None,
       lyrics_status: LyricsStatus::default(),
-      global_song_count: None,
-      global_song_count_failed: false,
       // Settings defaults
       settings_category: SettingsCategory::default(),
       settings_items: Vec::new(),
@@ -1125,7 +978,6 @@ impl Default for App {
       native_device_id: None,
       native_is_playing: None,
       native_playback_origin: None,
-      keepawake: None,
       last_device_activation: None,
       native_activation_pending: false,
       // Sort menu defaults
@@ -1136,15 +988,8 @@ impl Default for App {
       album_sort: SortState::new(),
       artist_sort: SortState::new(),
       liked_song_animation_frame: None,
-      animation_tick: 0,
-      last_party_sync_at: Instant::now(),
       status_message: None,
       status_message_expires_at: None,
-      party_status: PartyStatus::default(),
-      party_session: None,
-      party_input: Vec::new(),
-      party_input_idx: 0,
-      party_join_name: Vec::new(),
       pending_track_table_selection: None,
       playlist_track_positions: None,
       playlist_picker_selected_index: 0,
@@ -1164,23 +1009,8 @@ impl Default for App {
       last_dispatched_volume: None,
       #[cfg(feature = "streaming")]
       streaming_player: None,
-      #[cfg(all(feature = "mpris", target_os = "linux"))]
-      mpris_manager: None,
       #[cfg(feature = "cover-art")]
       cover_art: crate::tui::cover_art::CoverArt::new(),
-      friends: Vec::new(),
-      friends_loading: false,
-      friend_code: None,
-      friend_selected_index: 0,
-      friend_filter: FriendFilter::All,
-      friend_search_input: Vec::new(),
-      friend_add_dialog_visible: false,
-      friend_add_mode: FriendAddMode::Code,
-      friend_add_input: Vec::new(),
-      friend_user_search_input: Vec::new(),
-      friend_user_search_results: Vec::new(),
-      friend_user_search_selected: 0,
-      last_friends_refresh_at: Instant::now(),
       create_playlist_name: Vec::new(),
       create_playlist_name_idx: 0,
       create_playlist_name_cursor: 0,
@@ -1210,16 +1040,23 @@ impl App {
     }
   }
 
-  // Send a network event to the network thread
-  pub fn dispatch(&mut self, action: IoEvent) {
-    // `is_loading` will be set to false again after the async action has finished in network.rs
+  // Send a network event to the network thread.
+  // Returns false when the IO channel is closed so callers that set in-flight
+  // state optimistically can roll it back instead of getting stuck forever.
+  pub fn dispatch(&mut self, action: IoEvent) -> bool {
+    // `is_loading` will be set to false again after the async action has finished in network.rs.
+    // Keep this visible even in unit tests that use `App::default()` without an IO channel.
     self.is_loading = true;
+
     if let Some(io_tx) = &self.io_tx {
       if let Err(e) = io_tx.send(action) {
         self.is_loading = false;
         println!("Error from dispatch {}", e);
-        // TODO: handle error
-      };
+        return false;
+      }
+      true
+    } else {
+      false
     }
   }
 
@@ -1250,49 +1087,50 @@ impl App {
     targets
   }
 
-  #[allow(dead_code)]
-  pub fn enqueue_announcements(&mut self, announcements: Vec<Announcement>) {
-    if announcements.is_empty() {
-      return;
-    }
+  pub fn playback_target_count(&self) -> usize {
+    let spotify_count = self
+      .devices
+      .as_ref()
+      .map(|payload| {
+        payload
+          .devices
+          .iter()
+          .filter(|device| device.id.is_some())
+          .count()
+      })
+      .unwrap_or(0);
 
-    let mut existing_ids: HashSet<String> = self
-      .pending_announcements
-      .iter()
-      .map(|announcement| announcement.id.clone())
-      .collect();
+    spotify_count + self.sonos_rooms.len()
+  }
 
-    if let Some(active) = &self.active_announcement {
-      existing_ids.insert(active.id.clone());
-    }
+  pub fn playback_target_at(&self, index: usize) -> Option<PlaybackTargetRef<'_>> {
+    let mut remaining = index;
 
-    let mut incoming = announcements
-      .into_iter()
-      .filter(|announcement| existing_ids.insert(announcement.id.clone()))
-      .collect::<Vec<Announcement>>();
+    if let Some(payload) = &self.devices {
+      for device in &payload.devices {
+        let Some(id) = device.id.as_deref() else {
+          continue;
+        };
 
-    if self.active_announcement.is_none() {
-      if let Some(first) = incoming.first().cloned() {
-        self.active_announcement = Some(first);
-        incoming.remove(0);
+        if remaining == 0 {
+          return Some(PlaybackTargetRef::Spotify {
+            id,
+            name: &device.name,
+            is_active: device.is_active,
+          });
+        }
+
+        remaining -= 1;
       }
     }
 
-    self.pending_announcements.extend(incoming);
-  }
-
-  pub fn dismiss_active_announcement(&mut self) -> Option<String> {
-    let dismissed_id = self
-      .active_announcement
-      .take()
-      .map(|announcement| announcement.id);
-
-    if let Some(next_announcement) = self.pending_announcements.first().cloned() {
-      self.active_announcement = Some(next_announcement);
-      self.pending_announcements.remove(0);
-    }
-
-    dismissed_id
+    self
+      .sonos_rooms
+      .get(remaining)
+      .map(|room| PlaybackTargetRef::Sonos {
+        is_selected: self.selected_sonos_room_uuid.as_ref() == Some(&room.uuid),
+        room,
+      })
   }
 
   // Close the IO channel to allow the network thread to exit gracefully
@@ -1304,20 +1142,6 @@ impl App {
     self.pending_playlist_track_add = None;
     self.pending_playlist_track_removal = None;
     self.playlist_picker_selected_index = 0;
-  }
-
-  pub fn clear_friend_add_dialog_state(&mut self) {
-    self.friend_add_dialog_visible = false;
-    self.friend_add_mode = FriendAddMode::Code;
-    self.friend_add_input.clear();
-    self.friend_user_search_input.clear();
-    self.friend_user_search_results.clear();
-    self.friend_user_search_selected = 0;
-  }
-
-  pub fn open_friend_add_dialog(&mut self) {
-    self.clear_friend_add_dialog_state();
-    self.friend_add_dialog_visible = true;
   }
 
   pub fn clear_dialog_state(&mut self) {
@@ -1432,12 +1256,20 @@ impl App {
     playlist.owner.id.id() == user.id.id() || playlist.collaborative
   }
 
-  pub fn editable_playlists(&self) -> Vec<&SimplifiedPlaylist> {
+  pub fn editable_playlist_count(&self) -> usize {
     self
       .all_playlists
       .iter()
       .filter(|playlist| self.playlist_is_editable(playlist))
-      .collect()
+      .count()
+  }
+
+  pub fn editable_playlist_at(&self, index: usize) -> Option<&SimplifiedPlaylist> {
+    self
+      .all_playlists
+      .iter()
+      .filter(|playlist| self.playlist_is_editable(playlist))
+      .nth(index)
   }
 
   pub fn begin_add_track_to_playlist_flow(
@@ -1464,7 +1296,7 @@ impl App {
       return;
     }
 
-    if self.editable_playlists().is_empty() {
+    if self.editable_playlist_count() == 0 {
       self.set_status_message("No editable playlists available".to_string(), 4);
       return;
     }
@@ -1505,15 +1337,6 @@ impl App {
       .iter()
       .filter(|item| self.is_playlist_item_visible_in_current_folder(item))
       .nth(display_index)
-  }
-
-  /// Get visible playlist items in the current folder (used by UI rendering).
-  pub fn get_playlist_display_items(&self) -> Vec<&PlaylistFolderItem> {
-    self
-      .playlist_folder_items
-      .iter()
-      .filter(|item| self.is_playlist_item_visible_in_current_folder(item))
-      .collect()
   }
 
   /// Get the SimplifiedPlaylist for a PlaylistFolderItem::Playlist variant
@@ -1596,38 +1419,17 @@ impl App {
       .as_millis();
 
     if !self.is_fetching_current_playback && elapsed >= poll_interval_ms {
-      self.is_fetching_current_playback = true;
       // Trigger the seek if the user has set a new position
       match self.seek_ms {
         Some(seek_ms) => self.apply_seek(seek_ms as u32),
-        None => self.dispatch(IoEvent::GetCurrentPlayback),
+        None => {
+          self.is_fetching_current_playback = self.dispatch(IoEvent::GetCurrentPlayback);
+        }
       }
     }
   }
 
   pub fn update_on_tick(&mut self, elapsed: Duration) {
-    // Increment global animation tick (wraps after ~9.4 quintillion ticks, effectively never)
-    self.animation_tick = self.animation_tick.wrapping_add(1);
-
-    // Periodic party sync: host broadcasts state about every 2 seconds.
-    // Keep this before early-return paths so sync still happens during native-streaming fast paths.
-    if self.party_status == PartyStatus::Hosting
-      && self.last_party_sync_at.elapsed() >= Duration::from_secs(2)
-    {
-      self.last_party_sync_at = Instant::now();
-      self.dispatch(IoEvent::SyncPlayback);
-    }
-
-    // Periodic friends refresh: re-fetch when the Friends screen is active, every 30 seconds.
-    if self.get_current_route().id == RouteId::Friends
-      && self.last_friends_refresh_at.elapsed() >= Duration::from_secs(30)
-      && !self.friends_loading
-      && self.user_config.behavior.sync_token.is_some()
-    {
-      self.last_friends_refresh_at = Instant::now();
-      self.dispatch(IoEvent::GetFriends);
-    }
-
     if let Some(expires_at) = self.status_message_expires_at {
       if Instant::now() >= expires_at {
         self.status_message = None;
@@ -1644,26 +1446,6 @@ impl App {
     }
 
     self.poll_current_playback();
-    let playing_now = self.user_config.behavior.keepawake_enabled
-      && self
-        .sonos_is_playing
-        .or(self.native_is_playing)
-        .or_else(|| self.current_playback_context.as_ref().map(|c| c.is_playing))
-        .unwrap_or(false);
-    match (playing_now, self.keepawake.is_some()) {
-      (true, false) => {
-        self.keepawake = keepawake::Builder::default()
-          .idle(true)
-          .sleep(true)
-          .display(true)
-          .reason("Playing music")
-          .app_name("spotatui")
-          .create()
-          .ok();
-      }
-      (false, true) => self.keepawake = None,
-      _ => {}
-    }
 
     if let Some(selected_uuid) = self.selected_sonos_room_uuid.as_deref() {
       if let Some(now_playing) = self.sonos_now_playing.as_ref().filter(|now_playing| {
@@ -1918,12 +1700,6 @@ impl App {
       player.seek(position_ms);
       self.last_native_seek = Some(Instant::now());
       self.pending_native_seek = None;
-
-      // Notify MPRIS clients that position jumped
-      #[cfg(all(feature = "mpris", target_os = "linux"))]
-      if let Some(ref mpris) = self.mpris_manager {
-        mpris.emit_seeked(position_ms as u64);
-      }
     }
   }
 
@@ -2751,7 +2527,7 @@ impl App {
         .clone()
         .into_iter()
         .collect::<Vec<FullArtist>>(),
-    ))
+    ));
   }
 
   pub fn get_current_user_saved_artists_next(&mut self) {
@@ -2851,36 +2627,31 @@ impl App {
   }
 
   pub fn shuffle(&mut self) {
-    if let Some(context) = &self.current_playback_context.clone() {
-      let new_shuffle_state = !context.shuffle_state;
-      info!("toggling shuffle: {}", new_shuffle_state);
-
-      // Use native streaming player for instant control (bypasses event channel latency)
-      #[cfg(feature = "streaming")]
-      if self.is_native_streaming_active_for_playback() {
-        if let Some(ref player) = self.streaming_player {
-          // Try to set shuffle on the native player
-          let _ = player.set_shuffle(new_shuffle_state);
-
-          // Update UI state immediately
-          if let Some(ctx) = &mut self.current_playback_context {
-            ctx.shuffle_state = new_shuffle_state;
-          }
-          self.user_config.behavior.shuffle_enabled = new_shuffle_state;
-          let _ = self.user_config.save_config();
-
-          // Notify MPRIS clients of the change
-          #[cfg(all(feature = "mpris", target_os = "linux"))]
-          if let Some(ref mpris) = self.mpris_manager {
-            mpris.set_shuffle(new_shuffle_state);
-          }
-          return;
-        }
-      }
-
-      // Fallback to API-based shuffle for external devices
-      self.dispatch(IoEvent::Shuffle(new_shuffle_state));
+    let Some(context) = self.current_playback_context.as_ref() else {
+      return;
     };
+    let new_shuffle_state = !context.shuffle_state;
+    info!("toggling shuffle: {}", new_shuffle_state);
+
+    // Use native streaming player for instant control (bypasses event channel latency)
+    #[cfg(feature = "streaming")]
+    if self.is_native_streaming_active_for_playback() {
+      if let Some(ref player) = self.streaming_player {
+        // Try to set shuffle on the native player
+        let _ = player.set_shuffle(new_shuffle_state);
+
+        // Update UI state immediately
+        if let Some(ctx) = &mut self.current_playback_context {
+          ctx.shuffle_state = new_shuffle_state;
+        }
+        self.user_config.behavior.shuffle_enabled = new_shuffle_state;
+        let _ = self.user_config.save_config();
+        return;
+      }
+    }
+
+    // Fallback to API-based shuffle for external devices
+    self.dispatch(IoEvent::Shuffle(new_shuffle_state));
   }
 
   pub fn get_current_user_saved_albums_next(&mut self) {
@@ -3200,61 +2971,39 @@ impl App {
     }
   }
 
-  /// Toggle the audio analysis visualization view
-  /// This now uses local FFT analysis instead of the deprecated Spotify API
-  pub fn get_audio_analysis(&mut self) {
-    info!("entering audio analysis view");
-    if self.get_current_route().id != RouteId::Analysis {
-      // Enter visualization mode
-      self.push_navigation_stack(RouteId::Analysis, ActiveBlock::Analysis);
-    }
-    // Spectrum data will be updated by the audio capture system on each tick
-  }
-
   pub fn repeat(&mut self) {
-    if let Some(context) = &self.current_playback_context.clone() {
-      let current_repeat_state = context.repeat_state;
-      info!("toggling repeat mode: {:?}", current_repeat_state);
+    let Some(context) = self.current_playback_context.as_ref() else {
+      return;
+    };
+    let current_repeat_state = context.repeat_state;
+    info!("toggling repeat mode: {:?}", current_repeat_state);
 
-      // Use native streaming player for instant control (bypasses event channel latency)
-      #[cfg(feature = "streaming")]
-      if self.is_native_streaming_active_for_playback() {
-        if let Some(ref player) = self.streaming_player {
-          use rspotify::model::enums::RepeatState;
+    // Use native streaming player for instant control (bypasses event channel latency)
+    #[cfg(feature = "streaming")]
+    if self.is_native_streaming_active_for_playback() {
+      if let Some(ref player) = self.streaming_player {
+        use rspotify::model::enums::RepeatState;
 
-          // Try to set repeat on the native player (pass current state, not next)
-          let _ = player.set_repeat(current_repeat_state);
+        // Try to set repeat on the native player (pass current state, not next)
+        let _ = player.set_repeat(current_repeat_state);
 
-          // Calculate next state for UI update
-          let next_repeat_state = match current_repeat_state {
-            RepeatState::Off => RepeatState::Context,
-            RepeatState::Context => RepeatState::Track,
-            RepeatState::Track => RepeatState::Off,
-          };
+        // Calculate next state for UI update
+        let next_repeat_state = match current_repeat_state {
+          RepeatState::Off => RepeatState::Context,
+          RepeatState::Context => RepeatState::Track,
+          RepeatState::Track => RepeatState::Off,
+        };
 
-          // Update UI state immediately
-          if let Some(ctx) = &mut self.current_playback_context {
-            ctx.repeat_state = next_repeat_state;
-          }
-
-          // Notify MPRIS clients of the change
-          #[cfg(all(feature = "mpris", target_os = "linux"))]
-          if let Some(ref mpris) = self.mpris_manager {
-            use crate::infra::mpris::LoopStatusEvent;
-            let loop_status = match next_repeat_state {
-              RepeatState::Off => LoopStatusEvent::None,
-              RepeatState::Context => LoopStatusEvent::Playlist,
-              RepeatState::Track => LoopStatusEvent::Track,
-            };
-            mpris.set_loop_status(loop_status);
-          }
-          return;
+        // Update UI state immediately
+        if let Some(ctx) = &mut self.current_playback_context {
+          ctx.repeat_state = next_repeat_state;
         }
+        return;
       }
-
-      // Fallback to API-based repeat for external devices
-      self.dispatch(IoEvent::Repeat(current_repeat_state));
     }
+
+    // Fallback to API-based repeat for external devices
+    self.dispatch(IoEvent::Repeat(current_repeat_state));
   }
 
   pub fn get_artist(&mut self, artist_id: ArtistId<'static>, input_artist_name: String) {
@@ -3326,14 +3075,6 @@ impl App {
           value: SettingValue::Number(self.user_config.behavior.tick_rate_milliseconds as i64),
         },
         SettingItem {
-          id: "behavior.animation_tick_rate_milliseconds".to_string(),
-          name: "Animation Tick Rate (ms)".to_string(),
-          description: "Refresh rate for animation-heavy views".to_string(),
-          value: SettingValue::Number(
-            self.user_config.behavior.animation_tick_rate_milliseconds as i64,
-          ),
-        },
-        SettingItem {
           id: "behavior.enable_text_emphasis".to_string(),
           name: "Text Emphasis".to_string(),
           description: "Enable bold/italic text styling".to_string(),
@@ -3364,22 +3105,10 @@ impl App {
           value: SettingValue::Bool(self.user_config.behavior.set_window_title),
         },
         SettingItem {
-          id: "behavior.enable_discord_rpc".to_string(),
-          name: "Discord Rich Presence".to_string(),
-          description: "Show your current track in Discord".to_string(),
-          value: SettingValue::Bool(self.user_config.behavior.enable_discord_rpc),
-        },
-        SettingItem {
           id: "behavior.stop_after_current_track".to_string(),
           name: "Stop After Current Track".to_string(),
           description: "Pause playback when the current track finishes".to_string(),
           value: SettingValue::Bool(self.user_config.behavior.stop_after_current_track),
-        },
-        SettingItem {
-          id: "behavior.keepawake_enabled".to_string(),
-          name: "Keep System Awake".to_string(),
-          description: "Prevent the system from sleeping while music is playing".to_string(),
-          value: SettingValue::Bool(self.user_config.behavior.keepawake_enabled),
         },
         SettingItem {
           id: "behavior.startup_behavior".to_string(),
@@ -3393,52 +3122,6 @@ impl App {
               .name()
               .to_string(),
             crate::core::user_config::StartupBehavior::options(),
-          ),
-        },
-        SettingItem {
-          id: "behavior.enable_announcements".to_string(),
-          name: "Remote Announcements".to_string(),
-          description: "Show one-time announcements from remote JSON feed".to_string(),
-          value: SettingValue::Bool(self.user_config.behavior.enable_announcements),
-        },
-        #[cfg(feature = "self-update")]
-        SettingItem {
-          id: "behavior.disable_auto_update".to_string(),
-          name: "Disable Auto-Update".to_string(),
-          description: "Skip the automatic update check on startup. Use the 'spotatui update' command to update manually.".to_string(),
-          value: SettingValue::Bool(self.user_config.behavior.disable_auto_update),
-        },
-        #[cfg(feature = "self-update")]
-        SettingItem {
-          id: "behavior.auto_update_delay".to_string(),
-          name: "Auto-Update Delay".to_string(),
-          description: "How long to wait before installing an available update. Use '0' for immediate, or e.g. '10m', '2h', '7d'. Only applies when auto-update is enabled.".to_string(),
-          value: SettingValue::String(self.user_config.behavior.auto_update_delay.clone()),
-        },
-        SettingItem {
-          id: "behavior.announcement_feed_url".to_string(),
-          name: "Announcements Feed URL".to_string(),
-          description: "Remote JSON feed URL (HTTPS)".to_string(),
-          value: SettingValue::String(
-            self
-              .user_config
-              .behavior
-              .announcement_feed_url
-              .clone()
-              .unwrap_or_default(),
-          ),
-        },
-        SettingItem {
-          id: "behavior.sync_token".to_string(),
-          name: "Sync Token".to_string(),
-          description: "API token from spotatui.com to sync listening history".to_string(),
-          value: SettingValue::String(
-            self
-              .user_config
-              .behavior
-              .sync_token
-              .clone()
-              .unwrap_or_default(),
           ),
         },
         SettingItem {
@@ -3631,15 +3314,8 @@ impl App {
         SettingItem {
           id: "keys.like_track".to_string(),
           name: "Like Track".to_string(),
-          description: "Toggle saved state for the currently playing track or episode"
-            .to_string(),
+          description: "Toggle saved state for the currently playing track or episode".to_string(),
           value: SettingValue::Key(key_to_string(&self.user_config.keys.like_track)),
-        },
-        SettingItem {
-          id: "keys.generate_recap".to_string(),
-          name: "Generate Listening Recap".to_string(),
-          description: "Generate and open the 30-day listening recap HTML card".to_string(),
-          value: SettingValue::Key(key_to_string(&self.user_config.keys.generate_recap)),
         },
         SettingItem {
           id: "keys.copy_song_url".to_string(),
@@ -3652,12 +3328,6 @@ impl App {
           name: "Copy Album URL".to_string(),
           description: "Copy current album URL to clipboard".to_string(),
           value: SettingValue::Key(key_to_string(&self.user_config.keys.copy_album_url)),
-        },
-        SettingItem {
-          id: "keys.audio_analysis".to_string(),
-          name: "Audio Analysis".to_string(),
-          description: "Open audio analysis view".to_string(),
-          value: SettingValue::Key(key_to_string(&self.user_config.keys.audio_analysis)),
         },
         SettingItem {
           id: "keys.lyrics_view".to_string(),
@@ -3757,7 +3427,9 @@ impl App {
             id: "theme.playbar_progress_text".to_string(),
             name: "Playbar Progress Text".to_string(),
             description: "Color for playbar progress text".to_string(),
-            value: SettingValue::Color(color_to_string(self.user_config.theme.playbar_progress_text)),
+            value: SettingValue::Color(color_to_string(
+              self.user_config.theme.playbar_progress_text,
+            )),
           },
           SettingItem {
             id: "theme.playbar_text".to_string(),
@@ -3814,12 +3486,6 @@ impl App {
             self.user_config.behavior.tick_rate_milliseconds = normalize_tick_rate_milliseconds(*v);
           }
         }
-        "behavior.animation_tick_rate_milliseconds" => {
-          if let SettingValue::Number(v) = &setting.value {
-            self.user_config.behavior.animation_tick_rate_milliseconds =
-              normalize_tick_rate_milliseconds(*v);
-          }
-        }
         "behavior.enable_text_emphasis" => {
           if let SettingValue::Bool(v) = &setting.value {
             self.user_config.behavior.enable_text_emphasis = *v;
@@ -3845,11 +3511,6 @@ impl App {
             self.user_config.behavior.set_window_title = *v;
           }
         }
-        "behavior.enable_discord_rpc" => {
-          if let SettingValue::Bool(v) = &setting.value {
-            self.user_config.behavior.enable_discord_rpc = *v;
-          }
-        }
         "behavior.stop_after_current_track" => {
           if let SettingValue::Bool(v) = &setting.value {
             self.user_config.behavior.stop_after_current_track = *v;
@@ -3859,48 +3520,6 @@ impl App {
           if let SettingValue::Cycle(v, _) = &setting.value {
             self.user_config.behavior.startup_behavior =
               crate::core::user_config::StartupBehavior::from_name(v);
-          }
-        }
-        "behavior.keepawake_enabled" => {
-          if let SettingValue::Bool(v) = &setting.value {
-            self.user_config.behavior.keepawake_enabled = *v;
-          }
-        }
-        "behavior.enable_announcements" => {
-          if let SettingValue::Bool(v) = &setting.value {
-            self.user_config.behavior.enable_announcements = *v;
-          }
-        }
-        #[cfg(feature = "self-update")]
-        "behavior.disable_auto_update" => {
-          if let SettingValue::Bool(v) = &setting.value {
-            self.user_config.behavior.disable_auto_update = *v;
-          }
-        }
-        #[cfg(feature = "self-update")]
-        "behavior.auto_update_delay" => {
-          if let SettingValue::String(v) = &setting.value {
-            self.user_config.behavior.auto_update_delay = v.clone();
-          }
-        }
-        "behavior.announcement_feed_url" => {
-          if let SettingValue::String(v) = &setting.value {
-            let trimmed = v.trim();
-            self.user_config.behavior.announcement_feed_url = if trimmed.is_empty() {
-              None
-            } else {
-              Some(trimmed.to_string())
-            };
-          }
-        }
-        "behavior.sync_token" => {
-          if let SettingValue::String(v) = &setting.value {
-            let trimmed = v.trim();
-            self.user_config.behavior.sync_token = if trimmed.is_empty() {
-              None
-            } else {
-              Some(trimmed.to_string())
-            };
           }
         }
         "behavior.liked_icon" => {
@@ -4111,13 +3730,6 @@ impl App {
             }
           }
         }
-        "keys.generate_recap" => {
-          if let SettingValue::Key(v) = &setting.value {
-            if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
-              self.user_config.keys.generate_recap = key;
-            }
-          }
-        }
         "keys.copy_song_url" => {
           if let SettingValue::Key(v) = &setting.value {
             if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
@@ -4129,13 +3741,6 @@ impl App {
           if let SettingValue::Key(v) = &setting.value {
             if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
               self.user_config.keys.copy_album_url = key;
-            }
-          }
-        }
-        "keys.audio_analysis" => {
-          if let SettingValue::Key(v) = &setting.value {
-            if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
-              self.user_config.keys.audio_analysis = key;
             }
           }
         }
@@ -4833,13 +4438,20 @@ mod tests {
       simplified_playlist("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
     ];
 
-    let editable_names = app
-      .editable_playlists()
-      .into_iter()
-      .map(|playlist| playlist.name.clone())
-      .collect::<Vec<_>>();
-
-    assert_eq!(editable_names, vec!["Owned", "Collaborative"]);
+    assert_eq!(app.editable_playlist_count(), 2);
+    assert_eq!(
+      app
+        .editable_playlist_at(0)
+        .map(|playlist| playlist.name.as_str()),
+      Some("Owned")
+    );
+    assert_eq!(
+      app
+        .editable_playlist_at(1)
+        .map(|playlist| playlist.name.as_str()),
+      Some("Collaborative")
+    );
+    assert!(app.editable_playlist_at(2).is_none());
   }
 
   #[test]

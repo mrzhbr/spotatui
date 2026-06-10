@@ -1,6 +1,5 @@
 use crate::core::app::{ActiveBlock, App};
 use crate::tui::banner::BANNER;
-use colorgrad::{self, Gradient};
 use ratatui::{
   layout::{Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
@@ -65,48 +64,30 @@ pub fn draw_home(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     .border_style(get_color(highlight_state, app.user_config.theme));
   f.render_widget(welcome, layout_chunk);
 
-  // Banner gradient is recomputed each frame for animation
-  let gradient_lines = build_banner_gradient_lines(&app.user_config.theme, app.animation_tick);
-  let base_changelog_lines = get_changelog_cache(&app.user_config.theme, changelog_area.width);
+  let changelog_lines = get_changelog_lines_window(
+    &app.user_config.theme,
+    changelog_area.width,
+    usize::from(app.home_scroll),
+    changelog_area.height as usize,
+  );
 
   // Contains the banner
-  let top_text = Paragraph::new(Text::from(gradient_lines))
-    .style(app.user_config.theme.base_style())
+  let top_text = Paragraph::new(BANNER)
+    .style(
+      app
+        .user_config
+        .theme
+        .base_style()
+        .fg(app.user_config.theme.banner),
+    )
     .block(Block::default());
   f.render_widget(top_text, banner_area);
-
-  // Prepend global counter status to the changelog view
-  let mut changelog_lines = Vec::with_capacity(base_changelog_lines.len() + 2);
-  let counter_message = if cfg!(feature = "telemetry") {
-    if app.user_config.behavior.enable_global_song_count {
-      match app.global_song_count {
-        Some(count) => format!("Global songs played with spotatui: {}", count),
-        None if app.global_song_count_failed => {
-          "Global song counter unavailable right now.".to_string()
-        }
-        None => "Loading global song count...".to_string(),
-      }
-    } else {
-      "Global song counter disabled (Settings -> Behavior).".to_string()
-    }
-  } else {
-    "Global song counter unavailable (telemetry disabled in this build).".to_string()
-  };
-
-  let counter_style = Style::default().fg(app.user_config.theme.hint);
-  changelog_lines.push(Line::from(vec![Span::styled(
-    counter_message,
-    counter_style,
-  )]));
-  changelog_lines.push(Line::from(""));
-  changelog_lines.extend(base_changelog_lines);
 
   // CHANGELOG
   let bottom_text = Paragraph::new(Text::from(changelog_lines))
     .block(Block::default())
     .style(app.user_config.theme.base_style())
-    .wrap(Wrap { trim: false })
-    .scroll((app.home_scroll, 0));
+    .wrap(Wrap { trim: false });
   f.render_widget(bottom_text, changelog_area);
 }
 
@@ -123,9 +104,11 @@ fn get_clean_changelog() -> &'static str {
     .as_str()
 }
 
-fn get_changelog_cache(
+fn get_changelog_lines_window(
   theme: &crate::core::user_config::Theme,
   changelog_width: u16,
+  offset: usize,
+  visible_rows: usize,
 ) -> Vec<Line<'static>> {
   let cache = CHANGELOG_CACHE.get_or_init(|| {
     let changelog = get_clean_changelog();
@@ -142,76 +125,13 @@ fn get_changelog_cache(
     cache.changelog_lines = build_changelog_lines(changelog, theme, changelog_width);
     cache.key = key;
   }
-  cache.changelog_lines.clone()
-}
 
-fn build_banner_gradient_lines(
-  theme: &crate::core::user_config::Theme,
-  animation_tick: u64,
-) -> Vec<Line<'static>> {
-  fn to_rgba(color: ratatui::style::Color) -> (u8, u8, u8, u8) {
-    match color {
-      ratatui::style::Color::Rgb(r, g, b) => (r, g, b, 255),
-      ratatui::style::Color::Black => (0, 0, 0, 255),
-      ratatui::style::Color::Red => (255, 0, 0, 255),
-      ratatui::style::Color::Green => (0, 255, 0, 255),
-      ratatui::style::Color::Yellow => (255, 255, 0, 255),
-      ratatui::style::Color::Blue => (0, 0, 255, 255),
-      ratatui::style::Color::Magenta => (255, 0, 255, 255),
-      ratatui::style::Color::Cyan => (0, 255, 255, 255),
-      ratatui::style::Color::Gray => (128, 128, 128, 255),
-      ratatui::style::Color::DarkGray => (64, 64, 64, 255),
-      ratatui::style::Color::LightRed => (255, 128, 128, 255),
-      ratatui::style::Color::LightGreen => (128, 255, 128, 255),
-      ratatui::style::Color::LightYellow => (255, 255, 128, 255),
-      ratatui::style::Color::LightBlue => (128, 128, 255, 255),
-      ratatui::style::Color::LightMagenta => (255, 128, 255, 255),
-      ratatui::style::Color::LightCyan => (128, 255, 255, 255),
-      ratatui::style::Color::White => (255, 255, 255, 255),
-      _ => (255, 255, 255, 255),
-    }
-  }
-
-  let c1 = to_rgba(theme.banner);
-  let c2 = to_rgba(theme.hovered);
-  let c3 = to_rgba(theme.active);
-
-  // Build a looping gradient: banner → hovered → active → banner
-  // This ensures a smooth wrap-around for continuous animation
-  let grad = colorgrad::GradientBuilder::new()
-    .colors(&[
-      colorgrad::Color::from_rgba8(c1.0, c1.1, c1.2, c1.3),
-      colorgrad::Color::from_rgba8(c2.0, c2.1, c2.2, c2.3),
-      colorgrad::Color::from_rgba8(c3.0, c3.1, c3.2, c3.3),
-      colorgrad::Color::from_rgba8(c1.0, c1.1, c1.2, c1.3),
-    ])
-    .build::<colorgrad::LinearGradient>()
-    .unwrap();
-
-  // Phase offset scrolls the gradient over time (~4 seconds per full cycle at 62 FPS)
-  let phase = animation_tick as f64 * 0.004;
-
-  BANNER
-    .lines()
-    .enumerate()
-    .map(|(row, line)| {
-      let chars: Vec<char> = line.chars().collect();
-      let line_len = chars.len().max(1);
-      let spans: Vec<Span<'static>> = chars
-        .into_iter()
-        .enumerate()
-        .map(|(col, ch)| {
-          // Diagonal gradient: combine column position and row offset
-          let t = ((col as f64 / line_len as f64) + (row as f64 * 0.08) + phase) % 1.0;
-          let [r, g, b, _] = grad.at(t as f32).to_rgba8();
-          Span::styled(
-            ch.to_string(),
-            Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
-          )
-        })
-        .collect();
-      Line::from(spans)
-    })
+  cache
+    .changelog_lines
+    .iter()
+    .skip(offset)
+    .take(visible_rows)
+    .cloned()
     .collect()
 }
 
