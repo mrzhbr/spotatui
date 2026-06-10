@@ -1,8 +1,6 @@
 pub mod artist;
-pub mod audio_analysis;
 pub mod create_playlist;
 pub mod discover;
-pub mod friends;
 pub mod help;
 pub mod home;
 pub mod library;
@@ -23,7 +21,6 @@ use ratatui::{
 pub use self::artist::draw_artist_albums;
 pub use self::create_playlist::draw_create_playlist_form;
 pub use self::discover::draw_discover;
-pub use self::friends::draw_friends;
 pub use self::home::draw_home;
 pub use self::library::draw_user_block;
 #[cfg(feature = "cover-art")]
@@ -31,8 +28,7 @@ pub use self::player::draw_cover_art_view;
 pub use self::player::draw_miniplayer;
 pub use self::player::{draw_device_list, draw_lyrics_view, draw_playbar};
 pub use self::popups::{
-  draw_announcement_prompt, draw_dialog, draw_error_screen, draw_exit_prompt, draw_help_menu,
-  draw_party, draw_queue, draw_sort_menu,
+  draw_dialog, draw_error_screen, draw_exit_prompt, draw_help_menu, draw_queue, draw_sort_menu,
 };
 pub use self::search::{draw_input_and_help_box, draw_search_results};
 pub use self::tables::{
@@ -122,9 +118,6 @@ pub fn draw_routes(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     RouteId::Discover => {
       draw_discover(f, app, content_area);
     }
-    RouteId::Friends => {
-      draw_friends(f, app, content_area);
-    }
     RouteId::Artists => {
       draw_artist_table(f, app, content_area);
     }
@@ -136,16 +129,13 @@ pub fn draw_routes(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     }
     RouteId::Error
     | RouteId::SelectedDevice
-    | RouteId::Analysis
     | RouteId::LyricsView
     | RouteId::CoverArtView
     | RouteId::MiniPlayer
-    | RouteId::AnnouncementPrompt
     | RouteId::ExitPrompt
     | RouteId::Settings
     | RouteId::HelpMenu
-    | RouteId::Queue
-    | RouteId::Party => {} // These are drawn outside the main routed content area.
+    | RouteId::Queue => {} // These are drawn outside the main routed content area.
     RouteId::Dialog => {}         // This is handled in draw_dialog.
     RouteId::CreatePlaylist => {} // This is drawn as an overlay via draw_create_playlist_form.
   };

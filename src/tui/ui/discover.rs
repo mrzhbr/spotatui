@@ -1,4 +1,6 @@
 use crate::core::app::{ActiveBlock, App};
+use std::borrow::Cow;
+
 use ratatui::{
   layout::{Constraint, Layout, Rect},
   style::{Modifier, Style},
@@ -23,26 +25,28 @@ pub fn draw_discover(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
   ]));
 
   // Build discover options with status indicators
-  let artists_mix_status = if app.discover_loading && app.discover_selected_index == 0 {
-    " [Loading...]".to_string()
-  } else if !app.discover_artists_mix.is_empty() {
-    format!(" [{} tracks]", app.discover_artists_mix.len())
-  } else {
-    String::new()
-  };
+  let artists_mix_status: Cow<'static, str> =
+    if app.discover_loading && app.discover_selected_index == 0 {
+      Cow::Borrowed(" [Loading...]")
+    } else if !app.discover_artists_mix.is_empty() {
+      Cow::Owned(format!(" [{} tracks]", app.discover_artists_mix.len()))
+    } else {
+      Cow::Borrowed("")
+    };
 
-  let top_tracks_status = if app.discover_loading && app.discover_selected_index == 1 {
-    " [Loading...]".to_string()
-  } else if !app.discover_top_tracks.is_empty() {
-    format!(" [{} tracks]", app.discover_top_tracks.len())
-  } else {
-    String::new()
-  };
+  let top_tracks_status: Cow<'static, str> =
+    if app.discover_loading && app.discover_selected_index == 1 {
+      Cow::Borrowed(" [Loading...]")
+    } else if !app.discover_top_tracks.is_empty() {
+      Cow::Owned(format!(" [{} tracks]", app.discover_top_tracks.len()))
+    } else {
+      Cow::Borrowed("")
+    };
 
   let mut state = ListState::default();
   state.select(Some(app.discover_selected_index));
 
-  let list_items: Vec<ListItem> = vec![
+  let list_items = [
     // Top Artists Mix
     {
       let is_selected = app.discover_selected_index == 0;
@@ -54,10 +58,8 @@ pub fn draw_discover(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       };
       ListItem::new(Line::from(vec![
         Span::styled(prefix, Style::default().fg(app.user_config.theme.selected)),
-        Span::styled(
-          format!("{} Top Artists Mix", app.user_config.padded_liked_icon()),
-          text_style,
-        ),
+        Span::styled(app.user_config.behavior.liked_icon.as_str(), text_style),
+        Span::styled(" Top Artists Mix", text_style),
         Span::styled(
           artists_mix_status,
           Style::default().fg(app.user_config.theme.hint),
@@ -73,21 +75,18 @@ pub fn draw_discover(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       } else {
         Style::default().fg(app.user_config.theme.text)
       };
-      let time_range_label = format!(" ({})", app.discover_time_range.label());
+      let time_range_style = if is_selected {
+        Style::default().fg(app.user_config.theme.active)
+      } else {
+        Style::default().fg(app.user_config.theme.inactive)
+      };
       ListItem::new(Line::from(vec![
         Span::styled(prefix, Style::default().fg(app.user_config.theme.selected)),
-        Span::styled(
-          format!("{} Top Tracks", app.user_config.padded_liked_icon()),
-          text_style,
-        ),
-        Span::styled(
-          time_range_label,
-          if is_selected {
-            Style::default().fg(app.user_config.theme.active)
-          } else {
-            Style::default().fg(app.user_config.theme.inactive)
-          },
-        ),
+        Span::styled(app.user_config.behavior.liked_icon.as_str(), text_style),
+        Span::styled(" Top Tracks", text_style),
+        Span::styled(" (", time_range_style),
+        Span::styled(app.discover_time_range.label(), time_range_style),
+        Span::styled(")", time_range_style),
         Span::styled(
           top_tracks_status,
           Style::default().fg(app.user_config.theme.hint),
@@ -112,26 +111,25 @@ pub fn draw_discover(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
   f.render_stateful_widget(list, list_area, &mut state);
 
   // Info panel at bottom - context-sensitive help
+  let mut navigation_help = vec![
+    Span::styled("↑/↓ ", Style::default().fg(app.user_config.theme.hint)),
+    Span::styled("Navigate", Style::default().fg(app.user_config.theme.text)),
+    Span::styled("   Enter ", Style::default().fg(app.user_config.theme.hint)),
+    Span::styled("Select", Style::default().fg(app.user_config.theme.text)),
+  ];
+  if app.discover_selected_index == 1 {
+    navigation_help.push(Span::styled(
+      "   [/] ",
+      Style::default().fg(app.user_config.theme.hint),
+    ));
+    navigation_help.push(Span::styled(
+      "Time range",
+      Style::default().fg(app.user_config.theme.text),
+    ));
+  }
+
   let info_lines = vec![
-    Line::from(vec![
-      Span::styled("↑/↓ ", Style::default().fg(app.user_config.theme.hint)),
-      Span::styled("Navigate", Style::default().fg(app.user_config.theme.text)),
-      Span::styled("   Enter ", Style::default().fg(app.user_config.theme.hint)),
-      Span::styled("Select", Style::default().fg(app.user_config.theme.text)),
-      if app.discover_selected_index == 1 {
-        Span::styled("   [/] ", Style::default().fg(app.user_config.theme.hint))
-      } else {
-        Span::styled("", Style::default())
-      },
-      if app.discover_selected_index == 1 {
-        Span::styled(
-          "Time range",
-          Style::default().fg(app.user_config.theme.text),
-        )
-      } else {
-        Span::styled("", Style::default())
-      },
-    ]),
+    Line::from(navigation_help),
     Line::from(""),
     Line::from(vec![
       Span::styled(
@@ -156,9 +154,14 @@ pub fn draw_discover(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     Line::from(""),
     Line::from(vec![
       Span::styled(
-        format!("Time range: {} ", app.discover_time_range.label()),
+        "Time range: ",
         Style::default().fg(app.user_config.theme.text),
       ),
+      Span::styled(
+        app.discover_time_range.label(),
+        Style::default().fg(app.user_config.theme.text),
+      ),
+      Span::styled(" ", Style::default().fg(app.user_config.theme.text)),
       Span::styled(
         "(4 weeks / 6 months / All time)",
         Style::default().fg(app.user_config.theme.inactive),

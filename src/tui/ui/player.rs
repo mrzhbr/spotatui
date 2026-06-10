@@ -2,6 +2,8 @@ use crate::core::{
   app::{ActiveBlock, App},
   layout::{fullscreen_view_layout, miniplayer_playbar_area},
 };
+use std::borrow::Cow;
+
 use ratatui::{
   layout::{Alignment, Constraint, Layout, Position, Rect},
   style::{Color, Modifier, Style},
@@ -16,9 +18,11 @@ use rspotify::model::enums::RepeatState;
 use rspotify::model::PlayableItem;
 use rspotify::prelude::Id;
 
+#[cfg(feature = "cover-art")]
+use super::util::create_artist_string;
 use super::util::{
-  create_artist_string, display_track_progress, get_color, get_track_progress_percentage,
-  millis_to_minutes,
+  artist_line, display_track_progress, display_track_progress_unknown_duration, get_color,
+  get_track_progress_percentage, selectable_list_scroll_offset,
 };
 
 const PLAYBAR_CONTROLS: [PlaybarControl; 8] = [
@@ -38,6 +42,21 @@ const SONOS_PLAYBAR_CONTROLS: [PlaybarControl; 5] = [
   PlaybarControl::VolumeDown,
   PlaybarControl::VolumeUp,
 ];
+
+fn status_title_suffix(app: &App) -> Option<Cow<'_, str>> {
+  match (app.native_activation_pending, app.status_message.as_ref()) {
+    (true, Some(message)) => {
+      let prefix = "Native device activating | ";
+      let mut status = String::with_capacity(prefix.len() + message.len());
+      status.push_str(prefix);
+      status.push_str(message);
+      Some(Cow::Owned(status))
+    }
+    (true, None) => Some(Cow::Borrowed("Native device activating")),
+    (false, Some(message)) => Some(Cow::Borrowed(message.as_str())),
+    (false, None) => None,
+  }
+}
 #[cfg(feature = "cover-art")]
 const COVER_ART_CELL_RATIO: f32 = 1.9;
 #[cfg(feature = "cover-art")]
@@ -288,7 +307,7 @@ fn cover_playbar_controls_area(
   image_area: Rect,
   progress_area: Rect,
 ) -> Rect {
-  let required_width = playbar_controls_required_width();
+  let required_width = playbar_controls_required_width(&PLAYBAR_CONTROLS);
   let controls_y = progress_area.y.saturating_sub(1);
   let image_bottom = image_area.y.saturating_add(image_area.height);
 
@@ -370,6 +389,48 @@ fn playbar_control_hitboxes_in_area_for(
   hitboxes
 }
 
+fn playbar_control_at_in_area_for(
+  controls_area: Rect,
+  controls: &[PlaybarControl],
+  position: Position,
+) -> Option<PlaybarControl> {
+  if controls_area.width == 0 || controls_area.height == 0 {
+    return None;
+  }
+
+  let required_width = playbar_controls_required_width(controls);
+  let start_x = if controls_area.width > required_width {
+    controls_area
+      .x
+      .saturating_add((controls_area.width - required_width) / 2)
+  } else {
+    controls_area.x
+  };
+
+  let mut x = start_x;
+  let y = controls_area.y.saturating_add(controls_area.height / 2);
+  let right = controls_area.x.saturating_add(controls_area.width);
+
+  for control in controls.iter().copied() {
+    let width = control.button_label().len() as u16;
+    if x.saturating_add(width) > right {
+      break;
+    }
+    let rect = Rect {
+      x,
+      y,
+      width,
+      height: 1,
+    };
+    if rect.contains(position) {
+      return Some(control);
+    }
+    x = x.saturating_add(width.saturating_add(1));
+  }
+
+  None
+}
+
 fn playbar_controls_required_width(controls: &[PlaybarControl]) -> u16 {
   controls
     .iter()
@@ -381,10 +442,7 @@ fn playbar_controls_required_width(controls: &[PlaybarControl]) -> u16 {
     })
 }
 
-pub(crate) fn playbar_control_hitboxes(
-  app: &App,
-  playbar_area: Rect,
-) -> Vec<(PlaybarControl, Rect)> {
+fn current_playbar_controls(app: &App) -> Option<&'static [PlaybarControl]> {
   let has_spotify_item = app
     .current_playback_context
     .as_ref()
@@ -402,15 +460,24 @@ pub(crate) fn playbar_control_hitboxes(
     .is_some();
 
   if !has_spotify_item && !has_sonos_item {
-    return Vec::new();
+    None
+  } else if has_sonos_item && !has_spotify_item {
+    Some(&SONOS_PLAYBAR_CONTROLS)
+  } else {
+    Some(&PLAYBAR_CONTROLS)
   }
+}
+
+#[cfg(test)]
+pub(crate) fn playbar_control_hitboxes(
+  app: &App,
+  playbar_area: Rect,
+) -> Vec<(PlaybarControl, Rect)> {
+  let Some(controls) = current_playbar_controls(app) else {
+    return Vec::new();
+  };
 
   let controls_area = playbar_layout_areas(app, playbar_area).controls_area;
-  let controls: &[PlaybarControl] = if has_sonos_item && !has_spotify_item {
-    &SONOS_PLAYBAR_CONTROLS
-  } else {
-    &PLAYBAR_CONTROLS
-  };
   playbar_control_hitboxes_in_area_for(controls_area, controls)
     .into_iter()
     .map(|hitbox| (hitbox.control, hitbox.rect))
@@ -423,9 +490,9 @@ pub(crate) fn playbar_control_at(
   x: u16,
   y: u16,
 ) -> Option<PlaybarControl> {
-  playbar_control_hitboxes(app, playbar_area)
-    .into_iter()
-    .find_map(|(control, rect)| rect.contains(Position { x, y }).then_some(control))
+  let controls = current_playbar_controls(app)?;
+  let controls_area = playbar_layout_areas(app, playbar_area).controls_area;
+  playbar_control_at_in_area_for(controls_area, controls, Position { x, y })
 }
 
 fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, controls_area: Rect) {
@@ -533,7 +600,7 @@ fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
   app.cover_art.render_fullscreen(f, centered_area);
 
   // Draw song info below the cover art
-  if let Some(name) = track_name {
+  if let Some(name) = track_name.as_deref() {
     let title_y = centered_area.y + centered_area.height + 1;
     if title_y < area.y + area.height {
       let title = Paragraph::new(name)
@@ -554,7 +621,7 @@ fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
       );
     }
 
-    if let Some(artists) = artist_str {
+    if let Some(artists) = artist_str.as_deref() {
       let artist_y = title_y + 1;
       if artist_y < area.y + area.height {
         let artist = Paragraph::new(artists)
@@ -575,22 +642,28 @@ fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 #[cfg(feature = "cover-art")]
-fn extract_track_info(app: &App) -> (Option<String>, Option<String>) {
+fn extract_track_info(app: &App) -> (Option<Cow<'_, str>>, Option<Cow<'_, str>>) {
   use rspotify::model::PlayableItem;
 
   // Prefer native track info (more responsive after skipping tracks)
   if let Some(ref native_info) = app.native_track_info {
     return (
-      Some(native_info.name.clone()),
-      Some(native_info.artists_display.clone()),
+      Some(Cow::Borrowed(native_info.name.as_str())),
+      Some(Cow::Borrowed(native_info.artists_display.as_str())),
     );
   }
 
   if let Some(ctx) = &app.current_playback_context {
     if let Some(track_item) = &ctx.item {
       let (name, artists) = match track_item {
-        PlayableItem::Track(track) => (track.name.clone(), create_artist_string(&track.artists)),
-        PlayableItem::Episode(episode) => (episode.name.clone(), episode.show.name.clone()),
+        PlayableItem::Track(track) => (
+          Cow::Borrowed(track.name.as_str()),
+          Cow::Owned(create_artist_string(&track.artists)),
+        ),
+        PlayableItem::Episode(episode) => (
+          Cow::Borrowed(episode.name.as_str()),
+          Cow::Borrowed(episode.show.name.as_str()),
+        ),
         _ => return (None, None),
       };
       return (Some(name), Some(artists));
@@ -683,7 +756,7 @@ fn draw_lyrics(f: &mut Frame<'_>, app: &App, area: Rect) {
           Style::default().fg(Color::Rgb(100, 100, 100)) // Dim gray for inactive lines
         };
 
-        let p = Paragraph::new(text.clone())
+        let p = Paragraph::new(text.as_str())
           .style(style)
           .alignment(Alignment::Center);
 
@@ -733,8 +806,9 @@ fn draw_sonos_playbar(
     room.name,
     app.desired_volume()
   );
-  if let Some(message) = app.status_message.as_ref() {
-    title = format!("{} | {}", title, message);
+  if let Some(suffix) = status_title_suffix(app) {
+    title.push_str(" | ");
+    title.push_str(suffix.as_ref());
   }
 
   let current_route = app.get_current_route();
@@ -760,16 +834,13 @@ fn draw_sonos_playbar(
     .border_style(get_color(highlight_state, app.user_config.theme));
   f.render_widget(title_block, layout_chunk);
 
-  let track_name = now_playing
-    .title
-    .clone()
-    .unwrap_or_else(|| "Sonos playback".to_string());
+  let track_name = now_playing.title.as_deref().unwrap_or("Sonos playback");
   let display_artists = now_playing
     .artist
-    .clone()
-    .or_else(|| now_playing.album.clone())
-    .or_else(|| now_playing.track_uri.clone())
-    .unwrap_or_else(|| room.name.clone());
+    .as_deref()
+    .or(now_playing.album.as_deref())
+    .or(now_playing.track_uri.as_deref())
+    .unwrap_or(&room.name);
 
   let artist = Paragraph::new(Text::from(Span::styled(
     display_artists,
@@ -796,7 +867,7 @@ fn draw_sonos_playbar(
         display_track_progress(progress_ms, duration),
       )
     } else {
-      (0.0, format!("{}/--:--", millis_to_minutes(progress_ms)))
+      (0.0, display_track_progress_unknown_duration(progress_ms))
     };
   let modifier = if app.user_config.behavior.enable_text_emphasis {
     Modifier::ITALIC | Modifier::BOLD
@@ -838,7 +909,7 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
   if !drew_playbar {
     if let Some(current_playback_context) = &app.current_playback_context {
       if let Some(track_item) = &current_playback_context.item {
-        // Use native playing state when streaming is active (more reliable for MPRIS controls)
+        // Use native playing state when streaming is active.
         let is_playing = app
           .native_is_playing
           .filter(|_| app.is_streaming_active)
@@ -867,20 +938,9 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
           app.desired_volume()
         );
 
-        if let Some(session) = &app.party_session {
-          let party_label = match session.role {
-            crate::infra::network::sync::PartyRole::Host => {
-              format!("Party: {} listeners", session.guests.len())
-            }
-            crate::infra::network::sync::PartyRole::Guest => {
-              format!("Party: following {}", session.host_name)
-            }
-          };
-          title = format!("{} | {}", title, party_label);
-        }
-
-        if let Some(message) = app.status_message.as_ref() {
-          title = format!("{} | {}", title, message);
+        if let Some(suffix) = status_title_suffix(app) {
+          title.push_str(" | ");
+          title.push_str(suffix.as_ref());
         }
 
         let current_route = app.get_current_route();
@@ -907,67 +967,69 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
 
         f.render_widget(title_block, layout_chunk);
 
-        let (item_id, name, duration) = match track_item {
-          PlayableItem::Track(track) => (
-            track
-              .id
-              .as_ref()
-              .map(|id| id.id().to_string())
-              .unwrap_or_default(),
-            track.name.to_owned(),
-            track.duration,
-          ),
-          PlayableItem::Episode(episode) => (
-            episode.id.id().to_string(),
-            episode.name.to_owned(),
-            episode.duration,
-          ),
+        let (item_id, duration) = match track_item {
+          PlayableItem::Track(track) => (track.id.as_ref().map(|id| id.id()), track.duration),
+          PlayableItem::Episode(episode) => (Some(episode.id.id()), episode.duration),
           _ => return,
         };
 
         // Use native track info for instant display when available (e.g., after skipping tracks)
-        // Falls back to API data when native info is not available
-        let (display_name, display_artists, display_duration_ms) =
-          if let Some(ref native_info) = app.native_track_info {
-            (
-              native_info.name.clone(),
-              native_info.artists_display.clone(),
-              native_info.duration_ms as u64,
-            )
-          } else {
-            let artists_str = match track_item {
-              PlayableItem::Track(track) => create_artist_string(&track.artists),
-              PlayableItem::Episode(episode) => format!("{} - {}", episode.name, episode.show.name),
-              _ => return,
-            };
-            (
-              name.clone(),
-              artists_str,
+        // Falls back to API data when native info is not available.
+        let playbar_text_style = Style::default().fg(app.user_config.theme.playbar_text);
+        let (display_name, display_artists_line, display_duration_ms): (
+          Cow<'_, str>,
+          Line<'_>,
+          u64,
+        ) = if let Some(ref native_info) = app.native_track_info {
+          (
+            Cow::Borrowed(native_info.name.as_str()),
+            Line::from(Span::styled(
+              native_info.artists_display.as_str(),
+              playbar_text_style,
+            )),
+            native_info.duration_ms as u64,
+          )
+        } else {
+          match track_item {
+            PlayableItem::Track(track) => (
+              Cow::Borrowed(track.name.as_str()),
+              artist_line(&track.artists, playbar_text_style),
               duration.num_milliseconds() as u64,
-            )
-          };
+            ),
+            PlayableItem::Episode(episode) => (
+              Cow::Borrowed(episode.name.as_str()),
+              Line::from(vec![
+                Span::styled(episode.name.as_str(), playbar_text_style),
+                Span::styled(" - ", playbar_text_style),
+                Span::styled(episode.show.name.as_str(), playbar_text_style),
+              ]),
+              duration.num_milliseconds() as u64,
+            ),
+            _ => return,
+          }
+        };
 
-        let track_name = if app.liked_song_ids_set.contains(&item_id) {
-          format!("{}{}", &app.user_config.padded_liked_icon(), display_name)
+        let track_name = if item_id.is_some_and(|id| app.liked_song_ids_set.contains(id)) {
+          let liked_icon = app.user_config.behavior.liked_icon.as_str();
+          let mut track_name = String::with_capacity(liked_icon.len() + 1 + display_name.len());
+          track_name.push_str(liked_icon);
+          track_name.push(' ');
+          track_name.push_str(display_name.as_ref());
+          Cow::Owned(track_name)
         } else {
           display_name
         };
 
-        let lines = Text::from(Span::styled(
-          display_artists,
-          Style::default().fg(app.user_config.theme.playbar_text),
-        ));
+        let lines = Text::from(display_artists_line);
 
-        let artist = Paragraph::new(lines)
-          .style(Style::default().fg(app.user_config.theme.playbar_text))
-          .block(
-            Block::default().title(Span::styled(
-              track_name,
-              Style::default()
-                .fg(app.user_config.theme.selected)
-                .add_modifier(Modifier::BOLD),
-            )),
-          );
+        let artist = Paragraph::new(lines).style(playbar_text_style).block(
+          Block::default().title(Span::styled(
+            track_name,
+            Style::default()
+              .fg(app.user_config.theme.selected)
+              .add_modifier(Modifier::BOLD),
+          )),
+        );
         f.render_widget(artist, artist_area);
         draw_playbar_controls(f, app, playbar_areas.controls_area);
 
@@ -1050,10 +1112,33 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       .selected_sonos_room_uuid
       .as_ref()
       .and_then(|uuid| app.sonos_rooms.iter().find(|room| &room.uuid == uuid));
-    let title = match (selected_sonos, app.status_message.as_ref()) {
-      (Some(room), Some(message)) => Some(format!("Sonos: {} | {}", room.name, message)),
-      (Some(room), None) => Some(format!("Sonos: {} selected", room.name)),
-      (None, Some(message)) => Some(format!("Status: {}", message)),
+    let status_suffix = status_title_suffix(app);
+    let title = match (selected_sonos, status_suffix.as_ref()) {
+      (Some(room), Some(message)) => {
+        let message = message.as_ref();
+        let mut title =
+          String::with_capacity("Sonos: ".len() + room.name.len() + " | ".len() + message.len());
+        title.push_str("Sonos: ");
+        title.push_str(&room.name);
+        title.push_str(" | ");
+        title.push_str(message);
+        Some(title)
+      }
+      (Some(room), None) => {
+        let mut title =
+          String::with_capacity("Sonos: ".len() + room.name.len() + " selected".len());
+        title.push_str("Sonos: ");
+        title.push_str(&room.name);
+        title.push_str(" selected");
+        Some(title)
+      }
+      (None, Some(message)) => {
+        let message = message.as_ref();
+        let mut title = String::with_capacity("Status: ".len() + message.len());
+        title.push_str("Status: ");
+        title.push_str(message);
+        Some(title)
+      }
       (None, None) => None,
     };
 
@@ -1077,14 +1162,9 @@ pub fn draw_device_list(f: &mut Frame<'_>, app: &App) {
     .area()
     .layout(&Layout::vertical([Constraint::Percentage(20), Constraint::Percentage(80)]).margin(5));
 
-  let device_instructions: Vec<Line> = vec![
-        "To play tracks, please select a device. ",
-        "Use `j/k` or up/down arrow keys to move up and down and <Enter> to select. ",
-        "Your choice here will be cached so you can jump straight back in when you next open `spotatui`. ",
-        "You can change the playback device at any time by pressing `d`.",
-    ].into_iter().map(|instruction| Line::from(Span::raw(instruction))).collect();
+  const DEVICE_INSTRUCTIONS: &str = "To play tracks, please select a device.\nUse `j/k` or up/down arrow keys to move up and down and <Enter> to select.\nYour choice here will be cached so you can jump straight back in when you next open `spotatui`.\nYou can change the playback device at any time by pressing `d`.";
 
-  let instructions = Paragraph::new(device_instructions)
+  let instructions = Paragraph::new(DEVICE_INSTRUCTIONS)
     .style(Style::default().fg(app.user_config.theme.text))
     .wrap(Wrap { trim: true })
     .block(
@@ -1097,21 +1177,29 @@ pub fn draw_device_list(f: &mut Frame<'_>, app: &App) {
     );
   f.render_widget(instructions, instructions_area);
 
-  let no_device_message =
-    Span::raw("No devices found: start Spotify, or check that Sonos is on this network");
-  let targets = app.playback_targets();
-  let items = if targets.is_empty() {
-    vec![ListItem::new(no_device_message)]
-  } else {
-    targets
-      .iter()
-      .map(|target| ListItem::new(Span::raw(target.label())))
-      .collect()
-  };
-
+  let target_count = app.playback_target_count();
   let mut state = ListState::default();
-  state.select(app.selected_device_index);
-  let list = List::new(items)
+  let list = if target_count == 0 {
+    List::new(std::iter::once(ListItem::new(Span::raw(
+      "No devices found: start Spotify, or check that Sonos is on this network",
+    ))))
+  } else {
+    let selected = app
+      .selected_device_index
+      .unwrap_or(0)
+      .min(target_count.saturating_sub(1));
+    let visible_rows = list_area.height.saturating_sub(2) as usize;
+    let offset = selectable_list_scroll_offset(selected, visible_rows);
+    let visible_end = (offset + visible_rows).min(target_count);
+
+    state.select(Some(selected - offset));
+    List::new(
+      (offset..visible_end)
+        .filter_map(|index| app.playback_target_at(index))
+        .map(|target| ListItem::new(Span::raw(target.label()))),
+    )
+  };
+  let list = list
     .block(
       Block::default()
         .title(Span::styled(
@@ -1136,6 +1224,40 @@ pub fn draw_device_list(f: &mut Frame<'_>, app: &App) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn test_app() -> App {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    App::new(
+      tx,
+      crate::core::user_config::UserConfig::new(),
+      std::time::SystemTime::now(),
+    )
+  }
+
+  #[test]
+  fn status_title_suffix_includes_native_activation_state() {
+    let mut app = test_app();
+    app.native_activation_pending = true;
+
+    assert_eq!(
+      status_title_suffix(&app).as_deref(),
+      Some("Native device activating")
+    );
+
+    app.status_message = Some("Starting playback".to_string());
+    assert_eq!(
+      status_title_suffix(&app).as_deref(),
+      Some("Native device activating | Starting playback")
+    );
+  }
+
+  #[test]
+  fn status_title_suffix_uses_plain_status_when_native_is_not_pending() {
+    let mut app = test_app();
+    app.status_message = Some("Ready".to_string());
+
+    assert_eq!(status_title_suffix(&app).as_deref(), Some("Ready"));
+  }
 
   #[test]
   fn control_hitboxes_handle_zero_sized_area() {
@@ -1164,12 +1286,7 @@ mod tests {
 
   #[test]
   fn playbar_hitboxes_are_available_for_sonos_now_playing() {
-    let (tx, _rx) = std::sync::mpsc::channel();
-    let mut app = App::new(
-      tx,
-      crate::core::user_config::UserConfig::new(),
-      std::time::SystemTime::now(),
-    );
+    let mut app = test_app();
     app.selected_sonos_room_uuid = Some("RINCON_123".to_string());
     app
       .sonos_rooms

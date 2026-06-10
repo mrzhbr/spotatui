@@ -1,9 +1,7 @@
-use crate::core::app::{self, App, NativeTrackKind};
+use crate::core::app::{self, App};
 use crate::core::config::ClientConfig;
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
 use crate::infra::macos_media;
-#[cfg(all(feature = "mpris", target_os = "linux"))]
-use crate::infra::mpris;
 use crate::infra::network::IoEvent;
 use crate::infra::player::{get_default_cache_path, PlayerEvent, StreamingConfig, StreamingPlayer};
 use log::info;
@@ -26,8 +24,6 @@ pub struct PlayerEventContext {
   pub shared_position: Arc<AtomicU64>,
   pub shared_is_playing: Arc<AtomicBool>,
   pub recovery_tx: tokio::sync::mpsc::UnboundedSender<StreamingRecoveryRequest>,
-  #[cfg(all(feature = "mpris", target_os = "linux"))]
-  pub mpris_manager: Option<Arc<mpris::MprisManager>>,
   #[cfg(all(feature = "macos-media", target_os = "macos"))]
   pub macos_media_manager: Option<Arc<macos_media::MacMediaManager>>,
 }
@@ -40,8 +36,6 @@ pub struct StreamingRecoveryContext {
   pub recovery_tx: tokio::sync::mpsc::UnboundedSender<StreamingRecoveryRequest>,
   pub client_config: ClientConfig,
   pub redirect_uri: String,
-  #[cfg(all(feature = "mpris", target_os = "linux"))]
-  pub mpris_manager: Option<Arc<mpris::MprisManager>>,
   #[cfg(all(feature = "macos-media", target_os = "macos"))]
   pub macos_media_manager: Option<Arc<macos_media::MacMediaManager>>,
 }
@@ -104,8 +98,6 @@ async fn handle_streaming_recovery(mut ctx: StreamingRecoveryContext) {
           shared_position: Arc::clone(&ctx.shared_position),
           shared_is_playing: Arc::clone(&ctx.shared_is_playing),
           recovery_tx: ctx.recovery_tx.clone(),
-          #[cfg(all(feature = "mpris", target_os = "linux"))]
-          mpris_manager: ctx.mpris_manager.clone(),
           #[cfg(all(feature = "macos-media", target_os = "macos"))]
           macos_media_manager: ctx.macos_media_manager.clone(),
         });
@@ -134,8 +126,6 @@ pub fn spawn_player_event_handler(ctx: PlayerEventContext) {
   let shared_position = Arc::clone(&ctx.shared_position);
   let shared_is_playing = Arc::clone(&ctx.shared_is_playing);
   let recovery_tx = ctx.recovery_tx.clone();
-  #[cfg(all(feature = "mpris", target_os = "linux"))]
-  let mpris_manager = ctx.mpris_manager.clone();
   #[cfg(all(feature = "macos-media", target_os = "macos"))]
   let macos_media_manager = ctx.macos_media_manager.clone();
 
@@ -147,8 +137,6 @@ pub fn spawn_player_event_handler(ctx: PlayerEventContext) {
       shared_position,
       shared_is_playing,
       recovery_tx,
-      #[cfg(all(feature = "mpris", target_os = "linux"))]
-      mpris_manager,
       #[cfg(all(feature = "macos-media", target_os = "macos"))]
       macos_media_manager,
     )
@@ -165,9 +153,6 @@ async fn handle_player_events(
   shared_position: Arc<AtomicU64>,
   shared_is_playing: Arc<AtomicBool>,
   recovery_tx: tokio::sync::mpsc::UnboundedSender<StreamingRecoveryRequest>,
-  #[cfg(all(feature = "mpris", target_os = "linux"))] mpris_manager: Option<
-    Arc<mpris::MprisManager>,
-  >,
   #[cfg(all(feature = "macos-media", target_os = "macos"))] macos_media_manager: Option<
     Arc<macos_media::MacMediaManager>,
   >,
@@ -195,11 +180,6 @@ async fn handle_player_events(
         // Playback is actually working: reset the failure streak.
         consecutive_unavailable = 0;
         shared_is_playing.store(true, Ordering::Relaxed);
-
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_playback_status(true);
-        }
 
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
@@ -241,11 +221,6 @@ async fn handle_player_events(
         position_ms,
       } => {
         shared_is_playing.store(false, Ordering::Relaxed);
-
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_playback_status(false);
-        }
 
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
@@ -290,36 +265,21 @@ async fn handle_player_events(
       PlayerEvent::TrackChanged { audio_item } => {
         use librespot_metadata::audio::UniqueFields;
 
-        let (artists, album, kind) = match &audio_item.unique_fields {
+        let (artists, album) = match &audio_item.unique_fields {
           UniqueFields::Track { artists, album, .. } => {
             let artist_names: Vec<String> = artists.0.iter().map(|a| a.name.clone()).collect();
-            (artist_names, album.clone(), NativeTrackKind::Track)
+            (artist_names, album.clone())
           }
-          UniqueFields::Episode { show_name, .. } => (
-            vec![show_name.clone()],
-            String::new(),
-            NativeTrackKind::Episode,
-          ),
+          UniqueFields::Episode { show_name, .. } => (vec![show_name.clone()], String::new()),
           UniqueFields::Local { artists, album, .. } => {
             let artist_vec = artists
               .as_ref()
               .map(|a| vec![a.clone()])
               .unwrap_or_default();
             let album_str = album.clone().unwrap_or_default();
-            (artist_vec, album_str, NativeTrackKind::Track)
+            (artist_vec, album_str)
           }
         };
-
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_metadata(
-            &audio_item.name,
-            &artists,
-            &album,
-            audio_item.duration_ms,
-            None,
-          );
-        }
 
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
@@ -338,7 +298,6 @@ async fn handle_player_events(
           artists_display: artists.join(", "),
           album: album.clone(),
           duration_ms: audio_item.duration_ms,
-          kind,
         });
 
         app.song_progress_ms = 0;
@@ -347,11 +306,6 @@ async fn handle_player_events(
         app.dispatch(IoEvent::GetCurrentPlayback);
       }
       PlayerEvent::Stopped { .. } => {
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_stopped();
-        }
-
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_stopped();
@@ -373,11 +327,6 @@ async fn handle_player_events(
         }
       }
       PlayerEvent::EndOfTrack { track_id, .. } => {
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_stopped();
-        }
-
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_stopped();
@@ -404,11 +353,6 @@ async fn handle_player_events(
       }
       PlayerEvent::VolumeChanged { volume } => {
         let volume_percent = ((volume as f64 / 65535.0) * 100.0).round() as u8;
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_volume(volume_percent);
-        }
-
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_volume(volume_percent);
@@ -436,22 +380,12 @@ async fn handle_player_events(
       } => {
         shared_position.store(position_ms as u64, Ordering::Relaxed);
 
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_position(position_ms as u64);
-        }
-
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_position(position_ms as u64);
         }
       }
       PlayerEvent::SessionDisconnected { .. } => {
-        #[cfg(all(feature = "mpris", target_os = "linux"))]
-        if let Some(ref mpris) = mpris_manager {
-          mpris.set_stopped();
-        }
-
         #[cfg(all(feature = "macos-media", target_os = "macos"))]
         if let Some(ref macos_media) = macos_media_manager {
           macos_media.set_stopped();

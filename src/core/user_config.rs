@@ -8,7 +8,7 @@ const FILE_NAME: &str = "config.yml";
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "spotatui";
 pub const DEFAULT_TICK_RATE_MILLISECONDS: u64 = 250;
-pub const DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS: u64 = 16;
+const LEGACY_DEFAULT_TICK_RATE_MILLISECONDS: u64 = 16;
 pub const MAX_TICK_RATE_MILLISECONDS: u64 = 999;
 #[cfg(feature = "cover-art")]
 pub const MIN_PLAYBAR_COVER_ART_SIZE_PERCENT: u16 = 25;
@@ -41,47 +41,6 @@ pub fn validate_tick_rate_milliseconds(value: u64, label: &str) -> Result<u64> {
 
 pub fn normalize_tick_rate_milliseconds(value: i64) -> u64 {
   value.clamp(1, MAX_TICK_RATE_MILLISECONDS as i64) as u64
-}
-
-/// Parse a human-readable update delay into seconds.
-/// Accepts: "0", "30s", "10m", "2h", "7d", or a bare second count.
-pub fn parse_update_delay_secs(value: &str) -> Result<u64, String> {
-  let value = value.trim();
-  if value == "0" || value.is_empty() {
-    return Ok(0);
-  }
-
-  for (suffix, multiplier, label) in [
-    ("d", 86400_u64, "days"),
-    ("h", 3600_u64, "hours"),
-    ("m", 60_u64, "minutes"),
-    ("s", 1_u64, "seconds"),
-  ] {
-    if let Some(amount) = value.strip_suffix(suffix) {
-      return amount
-        .trim()
-        .parse::<u64>()
-        .map(|v| v * multiplier)
-        .map_err(|_| format!("Invalid {label} value"));
-    }
-  }
-
-  value
-    .parse::<u64>()
-    .map_err(|_| "Invalid numeric value or unknown suffix".to_string())
-}
-
-#[cfg(feature = "self-update")]
-pub fn format_update_delay_secs(secs: u64) -> String {
-  if secs >= 86400 {
-    format!("{}d", secs / 86400)
-  } else if secs >= 3600 {
-    format!("{}h", secs / 3600)
-  } else if secs >= 60 {
-    format!("{}m", secs / 60)
-  } else {
-    format!("{}s", secs)
-  }
 }
 
 fn default_app_config_dir() -> Option<PathBuf> {
@@ -465,39 +424,6 @@ impl ThemePreset {
   }
 }
 
-/// Available audio visualizer styles
-#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
-pub enum VisualizerStyle {
-  /// Equalizer mode: Uses tui-equalizer with half-block bars and brightness effect
-  ///
-  /// Note: Older configs may contain `Classic`; it is accepted as an alias for `Equalizer`.
-  #[default]
-  #[serde(alias = "Classic")]
-  Equalizer,
-  /// BarGraph mode: Uses tui-bar-graph with Braille patterns for high-resolution display
-  BarGraph,
-}
-
-impl VisualizerStyle {
-  pub fn all() -> &'static [VisualizerStyle] {
-    &[VisualizerStyle::Equalizer, VisualizerStyle::BarGraph]
-  }
-
-  pub fn name(&self) -> &'static str {
-    match self {
-      VisualizerStyle::Equalizer => "Equalizer",
-      VisualizerStyle::BarGraph => "Bar Graph",
-    }
-  }
-
-  pub fn next(&self) -> Self {
-    let styles = Self::all();
-    let current_idx = styles.iter().position(|s| s == self).unwrap_or(0);
-    let next_idx = (current_idx + 1) % styles.len();
-    styles[next_idx]
-  }
-}
-
 /// Controls the playback state immediately after spotatui connects to a device on startup.
 #[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -660,7 +586,6 @@ pub struct KeyBindingsString {
   submit: Option<String>,
   copy_song_url: Option<String>,
   copy_album_url: Option<String>,
-  audio_analysis: Option<String>,
   #[serde(alias = "basic_view")]
   lyrics_view: Option<String>,
   miniplayer_view: Option<String>,
@@ -669,9 +594,7 @@ pub struct KeyBindingsString {
   show_queue: Option<String>,
   open_settings: Option<String>,
   save_settings: Option<String>,
-  listening_party: Option<String>,
   like_track: Option<String>,
-  generate_recap: Option<String>,
 }
 
 #[derive(Clone)]
@@ -700,7 +623,6 @@ pub struct KeyBindings {
   pub submit: Key,
   pub copy_song_url: Key,
   pub copy_album_url: Key,
-  pub audio_analysis: Key,
   pub lyrics_view: Key,
   pub miniplayer_view: Key,
   pub cover_art_view: Key,
@@ -708,9 +630,7 @@ pub struct KeyBindings {
   pub show_queue: Key,
   pub open_settings: Key,
   pub save_settings: Key,
-  pub listening_party: Key,
   pub like_track: Key,
-  pub generate_recap: Key,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -719,17 +639,10 @@ pub struct BehaviorConfigString {
   pub volume_increment: Option<u8>,
   pub volume_percent: Option<u8>,
   pub tick_rate_milliseconds: Option<u64>,
-  pub animation_tick_rate_milliseconds: Option<u64>,
   pub enable_text_emphasis: Option<bool>,
   pub show_loading_indicator: Option<bool>,
   pub enforce_wide_search_bar: Option<bool>,
-  pub enable_global_song_count: Option<bool>,
   pub disable_mouse_inputs: Option<bool>,
-  pub enable_discord_rpc: Option<bool>,
-  pub discord_rpc_client_id: Option<String>,
-  pub enable_announcements: Option<bool>,
-  pub announcement_feed_url: Option<String>,
-  pub seen_announcement_ids: Option<Vec<String>>,
   pub shuffle_enabled: Option<bool>,
   pub liked_icon: Option<String>,
   pub shuffle_icon: Option<String>,
@@ -738,24 +651,17 @@ pub struct BehaviorConfigString {
   pub playing_icon: Option<String>,
   pub paused_icon: Option<String>,
   pub set_window_title: Option<bool>,
-  pub visualizer_style: Option<VisualizerStyle>,
-  pub dismissed_announcements: Option<Vec<String>>,
-  pub relay_server_url: Option<String>,
   pub stop_after_current_track: Option<bool>,
   pub sidebar_width_percent: Option<u8>,
   pub playbar_height_rows: Option<u16>,
   pub library_height_percent: Option<u8>,
   pub startup_behavior: Option<StartupBehavior>,
-  pub disable_auto_update: Option<bool>,
-  pub auto_update_delay: Option<String>,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art: Option<bool>,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art_forced: Option<bool>,
   #[cfg(feature = "cover-art")]
   pub playbar_cover_art_size_percent: Option<u16>,
-  pub keepawake_enabled: Option<bool>,
-  pub sync_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -764,17 +670,10 @@ pub struct BehaviorConfig {
   pub volume_increment: u8,
   pub volume_percent: u8,
   pub tick_rate_milliseconds: u64,
-  pub animation_tick_rate_milliseconds: u64,
   pub enable_text_emphasis: bool,
   pub show_loading_indicator: bool,
   pub enforce_wide_search_bar: bool,
-  pub enable_global_song_count: bool,
   pub disable_mouse_inputs: bool,
-  pub enable_discord_rpc: bool,
-  pub discord_rpc_client_id: Option<String>,
-  pub enable_announcements: bool,
-  pub announcement_feed_url: Option<String>,
-  pub seen_announcement_ids: Vec<String>,
   pub shuffle_enabled: bool,
   pub liked_icon: String,
   pub shuffle_icon: String,
@@ -783,24 +682,17 @@ pub struct BehaviorConfig {
   pub playing_icon: String,
   pub paused_icon: String,
   pub set_window_title: bool,
-  pub visualizer_style: VisualizerStyle,
-  pub dismissed_announcements: Vec<String>,
-  pub relay_server_url: String,
   pub stop_after_current_track: bool,
   pub sidebar_width_percent: u8,
   pub playbar_height_rows: u16,
   pub library_height_percent: u8,
   pub startup_behavior: StartupBehavior,
-  pub disable_auto_update: bool,
-  pub auto_update_delay: String,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art: bool,
   #[cfg(feature = "cover-art")]
   pub draw_cover_art_forced: bool,
   #[cfg(feature = "cover-art")]
   pub playbar_cover_art_size_percent: u16,
-  pub keepawake_enabled: bool,
-  pub sync_token: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -821,13 +713,6 @@ pub struct UserConfig {
 }
 
 impl UserConfig {
-  /// Get the spotatui app config directory (~/.config/spotatui).
-  /// Returns None if $HOME is not set.
-  #[cfg(feature = "self-update")]
-  pub fn get_app_config_dir() -> Option<PathBuf> {
-    default_app_config_dir()
-  }
-
   pub fn new() -> UserConfig {
     // Detect platform for platform-specific defaults
     #[cfg(target_os = "macos")]
@@ -864,7 +749,6 @@ impl UserConfig {
         submit: Key::Enter,
         copy_song_url: Key::Char('c'),
         copy_album_url: Key::Char('C'),
-        audio_analysis: Key::Char('v'),
         lyrics_view: Key::Char('B'),
         miniplayer_view: Key::Char('T'),
         cover_art_view: Key::Char('G'),
@@ -878,26 +762,17 @@ impl UserConfig {
           Key::Alt(',')
         },
         save_settings: Key::Alt('s'),
-        listening_party: Key::Ctrl('p'),
         like_track: Key::Char('F'),
-        generate_recap: Key::Char('R'),
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 5 * 1000,
         volume_increment: 10,
         volume_percent: 100,
         tick_rate_milliseconds: DEFAULT_TICK_RATE_MILLISECONDS,
-        animation_tick_rate_milliseconds: DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
         enable_text_emphasis: true,
         show_loading_indicator: true,
         enforce_wide_search_bar: false,
-        enable_global_song_count: true,
         disable_mouse_inputs: false,
-        enable_discord_rpc: true,
-        discord_rpc_client_id: None,
-        enable_announcements: true,
-        announcement_feed_url: None,
-        seen_announcement_ids: Vec::new(),
         shuffle_enabled: false,
         liked_icon: "♥".to_string(),
         shuffle_icon: "🔀".to_string(),
@@ -906,24 +781,17 @@ impl UserConfig {
         playing_icon: "▶".to_string(),
         paused_icon: "⏸".to_string(),
         set_window_title: true,
-        visualizer_style: VisualizerStyle::default(),
-        dismissed_announcements: Vec::new(),
-        relay_server_url: "wss://spotatui-party.spotatui.workers.dev/ws".to_string(),
         stop_after_current_track: false,
         sidebar_width_percent: 20,
         playbar_height_rows: 6,
         library_height_percent: 30,
         startup_behavior: StartupBehavior::Continue,
-        disable_auto_update: false,
-        auto_update_delay: "0".to_string(),
         #[cfg(feature = "cover-art")]
         draw_cover_art: true,
         #[cfg(feature = "cover-art")]
         draw_cover_art_forced: false,
         #[cfg(feature = "cover-art")]
         playbar_cover_art_size_percent: 100,
-        keepawake_enabled: true,
-        sync_token: None,
       },
       path_to_config: None,
     }
@@ -989,7 +857,6 @@ impl UserConfig {
     to_keys!(submit);
     to_keys!(copy_song_url);
     to_keys!(copy_album_url);
-    to_keys!(audio_analysis);
     to_keys!(lyrics_view);
     to_keys!(miniplayer_view);
     to_keys!(cover_art_view);
@@ -997,9 +864,7 @@ impl UserConfig {
     to_keys!(show_queue);
     to_keys!(open_settings);
     to_keys!(save_settings);
-    to_keys!(listening_party);
     to_keys!(like_track);
-    to_keys!(generate_recap);
 
     Ok(())
   }
@@ -1087,32 +952,16 @@ impl UserConfig {
       self.behavior.volume_percent = volume.min(100);
     }
 
-    let loaded_tick_rate = behavior_config.tick_rate_milliseconds;
-    let loaded_animation_tick_rate = behavior_config.animation_tick_rate_milliseconds;
-
-    if let Some(tick_rate) = loaded_tick_rate {
+    if let Some(tick_rate) = behavior_config.tick_rate_milliseconds {
       let tick_rate = validate_tick_rate_milliseconds(tick_rate, "Tick rate")?;
-      // Before animation ticks existed, save_config wrote the old 16ms default
-      // into user configs. Treat the legacy 16ms normal tick as the old default
-      // when animation ticks are absent or still equal to the animation default,
-      // so upgraded users get the new normal UI cadence without manual edits.
-      self.behavior.tick_rate_milliseconds = if tick_rate
-        == DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS
-        && loaded_animation_tick_rate
-          .map(|animation_tick_rate| {
-            animation_tick_rate == DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS
-          })
-          .unwrap_or(true)
-      {
+      // Older configs wrote the previous 16ms default into user files. Treat it
+      // as the old default so upgraded users get the lighter normal UI cadence
+      // without manual edits.
+      self.behavior.tick_rate_milliseconds = if tick_rate == LEGACY_DEFAULT_TICK_RATE_MILLISECONDS {
         DEFAULT_TICK_RATE_MILLISECONDS
       } else {
         tick_rate
       };
-    }
-
-    if let Some(tick_rate) = loaded_animation_tick_rate {
-      self.behavior.animation_tick_rate_milliseconds =
-        validate_tick_rate_milliseconds(tick_rate, "Animation tick rate")?;
     }
 
     if let Some(text_emphasis) = behavior_config.enable_text_emphasis {
@@ -1155,73 +1004,12 @@ impl UserConfig {
       self.behavior.set_window_title = set_window_title;
     }
 
-    if let Some(enable_global_song_count) = behavior_config.enable_global_song_count {
-      self.behavior.enable_global_song_count = enable_global_song_count;
-    }
-
     if let Some(disable_mouse_inputs) = behavior_config.disable_mouse_inputs {
       self.behavior.disable_mouse_inputs = disable_mouse_inputs;
     }
 
-    if let Some(enable_discord_rpc) = behavior_config.enable_discord_rpc {
-      self.behavior.enable_discord_rpc = enable_discord_rpc;
-    }
-
-    if let Some(enable_announcements) = behavior_config.enable_announcements {
-      self.behavior.enable_announcements = enable_announcements;
-    }
-
-    if let Some(announcement_feed_url) = behavior_config.announcement_feed_url {
-      let trimmed = announcement_feed_url.trim();
-      self.behavior.announcement_feed_url = if trimmed.is_empty() {
-        None
-      } else {
-        Some(trimmed.to_string())
-      };
-    }
-
-    if let Some(seen_announcement_ids) = behavior_config.seen_announcement_ids {
-      self.behavior.seen_announcement_ids = seen_announcement_ids
-        .into_iter()
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect();
-    }
-
-    if let Some(discord_rpc_client_id) = behavior_config.discord_rpc_client_id {
-      self.behavior.discord_rpc_client_id = Some(discord_rpc_client_id);
-    }
-
     if let Some(shuffle_enabled) = behavior_config.shuffle_enabled {
       self.behavior.shuffle_enabled = shuffle_enabled;
-    }
-
-    if let Some(visualizer_style) = behavior_config.visualizer_style {
-      self.behavior.visualizer_style = visualizer_style;
-    }
-
-    if let Some(dismissed_announcements) = behavior_config.dismissed_announcements {
-      self.behavior.dismissed_announcements = dismissed_announcements
-        .into_iter()
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect();
-    }
-
-    if let Some(relay_server_url) = behavior_config.relay_server_url {
-      let trimmed = relay_server_url.trim();
-      if !trimmed.is_empty() {
-        self.behavior.relay_server_url = trimmed.to_string();
-      }
-    }
-
-    if let Some(sync_token) = behavior_config.sync_token {
-      let trimmed = sync_token.trim();
-      if trimmed.is_empty() {
-        self.behavior.sync_token = None;
-      } else {
-        self.behavior.sync_token = Some(trimmed.to_string());
-      }
     }
 
     if let Some(stop_after_current_track) = behavior_config.stop_after_current_track {
@@ -1244,16 +1032,6 @@ impl UserConfig {
       self.behavior.startup_behavior = startup_behavior;
     }
 
-    if let Some(disable_auto_update) = behavior_config.disable_auto_update {
-      self.behavior.disable_auto_update = disable_auto_update;
-    }
-
-    if let Some(auto_update_delay) = behavior_config.auto_update_delay {
-      parse_update_delay_secs(&auto_update_delay)
-        .map_err(|e| anyhow!("Invalid auto-update delay: {e}"))?;
-      self.behavior.auto_update_delay = auto_update_delay;
-    }
-
     #[cfg(feature = "cover-art")]
     if let Some(draw_cover_art) = behavior_config.draw_cover_art {
       self.behavior.draw_cover_art = draw_cover_art;
@@ -1267,9 +1045,6 @@ impl UserConfig {
     if let Some(playbar_cover_art_size_percent) = behavior_config.playbar_cover_art_size_percent {
       self.behavior.playbar_cover_art_size_percent =
         clamp_playbar_cover_art_size_percent(playbar_cover_art_size_percent);
-    }
-    if let Some(keepawake_enabled) = behavior_config.keepawake_enabled {
-      self.behavior.keepawake_enabled = keepawake_enabled;
     }
     Ok(())
   }
@@ -1321,17 +1096,10 @@ impl UserConfig {
       volume_increment: Some(self.behavior.volume_increment),
       volume_percent: Some(self.behavior.volume_percent),
       tick_rate_milliseconds: Some(self.behavior.tick_rate_milliseconds),
-      animation_tick_rate_milliseconds: Some(self.behavior.animation_tick_rate_milliseconds),
       enable_text_emphasis: Some(self.behavior.enable_text_emphasis),
       show_loading_indicator: Some(self.behavior.show_loading_indicator),
       enforce_wide_search_bar: Some(self.behavior.enforce_wide_search_bar),
-      enable_global_song_count: Some(self.behavior.enable_global_song_count),
       disable_mouse_inputs: Some(self.behavior.disable_mouse_inputs),
-      enable_discord_rpc: Some(self.behavior.enable_discord_rpc),
-      discord_rpc_client_id: self.behavior.discord_rpc_client_id.clone(),
-      enable_announcements: Some(self.behavior.enable_announcements),
-      announcement_feed_url: self.behavior.announcement_feed_url.clone(),
-      seen_announcement_ids: Some(self.behavior.seen_announcement_ids.clone()),
       shuffle_enabled: Some(self.behavior.shuffle_enabled),
       liked_icon: Some(self.behavior.liked_icon.clone()),
       shuffle_icon: Some(self.behavior.shuffle_icon.clone()),
@@ -1340,24 +1108,17 @@ impl UserConfig {
       playing_icon: Some(self.behavior.playing_icon.clone()),
       paused_icon: Some(self.behavior.paused_icon.clone()),
       set_window_title: Some(self.behavior.set_window_title),
-      visualizer_style: Some(self.behavior.visualizer_style),
-      dismissed_announcements: Some(self.behavior.dismissed_announcements.clone()),
-      relay_server_url: Some(self.behavior.relay_server_url.clone()),
-      sync_token: self.behavior.sync_token.clone(),
       stop_after_current_track: Some(self.behavior.stop_after_current_track),
       sidebar_width_percent: Some(self.behavior.sidebar_width_percent),
       playbar_height_rows: Some(self.behavior.playbar_height_rows),
       library_height_percent: Some(self.behavior.library_height_percent),
       startup_behavior: Some(self.behavior.startup_behavior),
-      disable_auto_update: Some(self.behavior.disable_auto_update),
-      auto_update_delay: Some(self.behavior.auto_update_delay.clone()),
       #[cfg(feature = "cover-art")]
       draw_cover_art: Some(self.behavior.draw_cover_art),
       #[cfg(feature = "cover-art")]
       draw_cover_art_forced: Some(self.behavior.draw_cover_art_forced),
       #[cfg(feature = "cover-art")]
       playbar_cover_art_size_percent: Some(self.behavior.playbar_cover_art_size_percent),
-      keepawake_enabled: Some(self.behavior.keepawake_enabled),
     };
 
     // Helper to convert Key to config string
@@ -1424,7 +1185,6 @@ impl UserConfig {
       submit: Some(key_to_config_string(self.keys.submit)),
       copy_song_url: Some(key_to_config_string(self.keys.copy_song_url)),
       copy_album_url: Some(key_to_config_string(self.keys.copy_album_url)),
-      audio_analysis: Some(key_to_config_string(self.keys.audio_analysis)),
       lyrics_view: Some(key_to_config_string(self.keys.lyrics_view)),
       miniplayer_view: Some(key_to_config_string(self.keys.miniplayer_view)),
       cover_art_view: Some(key_to_config_string(self.keys.cover_art_view)),
@@ -1432,9 +1192,7 @@ impl UserConfig {
       show_queue: Some(key_to_config_string(self.keys.show_queue)),
       open_settings: Some(key_to_config_string(self.keys.open_settings)),
       save_settings: Some(key_to_config_string(self.keys.save_settings)),
-      listening_party: Some(key_to_config_string(self.keys.listening_party)),
       like_track: Some(key_to_config_string(self.keys.like_track)),
-      generate_recap: Some(key_to_config_string(self.keys.generate_recap)),
     };
 
     // Helper to build theme config from current values
@@ -1488,26 +1246,6 @@ impl UserConfig {
     std::io::Write::write_all(&mut config_file, content_yml.as_bytes())?;
 
     Ok(())
-  }
-
-  pub fn padded_liked_icon(&self) -> String {
-    format!("{} ", &self.behavior.liked_icon)
-  }
-
-  pub fn mark_announcement_seen(&mut self, announcement_id: impl Into<String>) {
-    let id = announcement_id.into();
-    if id.is_empty() {
-      return;
-    }
-
-    if !self
-      .behavior
-      .seen_announcement_ids
-      .iter()
-      .any(|seen| seen == &id)
-    {
-      self.behavior.seen_announcement_ids.push(id);
-    }
   }
 
   #[cfg(feature = "cover-art")]
@@ -1672,48 +1410,20 @@ mod tests {
   }
 
   #[test]
-  fn tick_rates_load_defaults_explicit_values_and_legacy_defaults() {
-    use super::{
-      BehaviorConfigString, UserConfig, DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
-      DEFAULT_TICK_RATE_MILLISECONDS,
-    };
+  fn tick_rate_loads_defaults_explicit_values_and_legacy_defaults() {
+    use super::{BehaviorConfigString, UserConfig, DEFAULT_TICK_RATE_MILLISECONDS};
 
-    for (yaml, expected_tick_rate, expected_animation_tick_rate) in [
-      (
-        "",
-        DEFAULT_TICK_RATE_MILLISECONDS,
-        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
-      ),
-      (
-        "tick_rate_milliseconds: 500\nanimation_tick_rate_milliseconds: 20",
-        500,
-        20,
-      ),
-      (
-        "tick_rate_milliseconds: 100",
-        100,
-        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
-      ),
-      (
-        "tick_rate_milliseconds: 16",
-        DEFAULT_TICK_RATE_MILLISECONDS,
-        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
-      ),
-      (
-        "tick_rate_milliseconds: 16\nanimation_tick_rate_milliseconds: 16",
-        DEFAULT_TICK_RATE_MILLISECONDS,
-        DEFAULT_ANIMATION_TICK_RATE_MILLISECONDS,
-      ),
+    for (yaml, expected_tick_rate) in [
+      ("", DEFAULT_TICK_RATE_MILLISECONDS),
+      ("tick_rate_milliseconds: 500", 500),
+      ("tick_rate_milliseconds: 100", 100),
+      ("tick_rate_milliseconds: 16", DEFAULT_TICK_RATE_MILLISECONDS),
     ] {
       let behavior: BehaviorConfigString = serde_yaml::from_str(yaml).unwrap();
       let mut config = UserConfig::new();
       config.load_behaviorconfig(behavior).unwrap();
 
       assert_eq!(config.behavior.tick_rate_milliseconds, expected_tick_rate);
-      assert_eq!(
-        config.behavior.animation_tick_rate_milliseconds,
-        expected_animation_tick_rate
-      );
     }
   }
 
@@ -1721,39 +1431,12 @@ mod tests {
   fn zero_tick_rates_are_rejected() {
     use super::{BehaviorConfigString, UserConfig};
 
-    for yaml in [
-      "tick_rate_milliseconds: 0",
-      "animation_tick_rate_milliseconds: 0",
-    ] {
+    for yaml in ["tick_rate_milliseconds: 0"] {
       let behavior: BehaviorConfigString = serde_yaml::from_str(yaml).unwrap();
       let mut config = UserConfig::new();
 
       assert!(config.load_behaviorconfig(behavior).is_err());
     }
-  }
-
-  #[test]
-  fn parse_update_delay_secs_accepts_supported_units() {
-    use super::parse_update_delay_secs;
-
-    assert_eq!(parse_update_delay_secs("0"), Ok(0));
-    assert_eq!(parse_update_delay_secs(""), Ok(0));
-    assert_eq!(parse_update_delay_secs("7d"), Ok(7 * 86400));
-    assert_eq!(parse_update_delay_secs("2h"), Ok(2 * 3600));
-    assert_eq!(parse_update_delay_secs("10m"), Ok(10 * 60));
-    assert_eq!(parse_update_delay_secs("30s"), Ok(30));
-    assert_eq!(parse_update_delay_secs("120"), Ok(120));
-    assert!(parse_update_delay_secs("bogus").is_err());
-  }
-
-  #[test]
-  fn invalid_auto_update_delay_is_rejected() {
-    use super::{BehaviorConfigString, UserConfig};
-
-    let behavior: BehaviorConfigString = serde_yaml::from_str("auto_update_delay: bogus").unwrap();
-    let mut config = UserConfig::new();
-
-    assert!(config.load_behaviorconfig(behavior).is_err());
   }
 
   #[cfg(feature = "cover-art")]

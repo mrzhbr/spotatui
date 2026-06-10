@@ -1,4 +1,5 @@
 use crate::core::app::{App, CreatePlaylistFocus, CreatePlaylistStage};
+use crate::tui::ui::util::selectable_list_scroll_offset;
 use ratatui::{
   layout::{Constraint, Direction, Layout, Rect},
   style::{Modifier, Style},
@@ -13,6 +14,14 @@ fn centered_rect(bounds: Rect, width_pct: u16, height_pct: u16) -> Rect {
   let x = bounds.x + bounds.width.saturating_sub(width) / 2;
   let y = bounds.y + bounds.height.saturating_sub(height) / 3;
   Rect::new(x, y, width, height)
+}
+
+fn track_artist_label(track_name: &str, artist: &str) -> String {
+  let mut label = String::with_capacity(track_name.len() + " — ".len() + artist.len());
+  label.push_str(track_name);
+  label.push_str(" — ");
+  label.push_str(artist);
+  label
 }
 
 pub fn draw_create_playlist_form(f: &mut Frame<'_>, app: &App) {
@@ -132,24 +141,35 @@ fn draw_add_tracks_stage(f: &mut Frame<'_>, app: &App, area: Rect) {
   } else {
     Style::default().fg(theme.inactive)
   };
-  let result_items: Vec<ListItem> = app
+  let results_visible_rows = panels[0].height.saturating_sub(2) as usize;
+  let results_offset = if app.create_playlist_focus == CreatePlaylistFocus::SearchResults {
+    selectable_list_scroll_offset(app.create_playlist_selected_result, results_visible_rows)
+  } else {
+    0
+  };
+  let result_items = app
     .create_playlist_search_results
     .iter()
+    .skip(results_offset)
+    .take(results_visible_rows.saturating_add(1))
     .map(|t| {
       let artist = t
         .artists
         .first()
         .map(|a| a.name.as_str())
         .unwrap_or("Unknown");
-      ListItem::new(format!("{} — {}", t.name, artist)).style(theme.base_style())
-    })
-    .collect();
+      ListItem::new(track_artist_label(&t.name, artist)).style(theme.base_style())
+    });
 
   let mut results_state = ListState::default();
   if app.create_playlist_focus == CreatePlaylistFocus::SearchResults
     && !app.create_playlist_search_results.is_empty()
   {
-    results_state.select(Some(app.create_playlist_selected_result));
+    results_state.select(
+      app
+        .create_playlist_selected_result
+        .checked_sub(results_offset),
+    );
   }
 
   let results_list = List::new(result_items)
@@ -177,24 +197,35 @@ fn draw_add_tracks_stage(f: &mut Frame<'_>, app: &App, area: Rect) {
     Style::default().fg(theme.inactive)
   };
 
-  let added_items: Vec<ListItem> = app
+  let added_visible_rows = panels[1].height.saturating_sub(2) as usize;
+  let added_offset = if app.create_playlist_focus == CreatePlaylistFocus::AddedTracks {
+    selectable_list_scroll_offset(app.create_playlist_selected_result, added_visible_rows)
+  } else {
+    0
+  };
+  let added_items = app
     .create_playlist_tracks
     .iter()
+    .skip(added_offset)
+    .take(added_visible_rows.saturating_add(1))
     .map(|t| {
       let artist = t
         .artists
         .first()
         .map(|a| a.name.as_str())
         .unwrap_or("Unknown");
-      ListItem::new(format!("{} — {}", t.name, artist)).style(theme.base_style())
-    })
-    .collect();
+      ListItem::new(track_artist_label(&t.name, artist)).style(theme.base_style())
+    });
 
   let mut added_state = ListState::default();
   if app.create_playlist_focus == CreatePlaylistFocus::AddedTracks
     && !app.create_playlist_tracks.is_empty()
   {
-    added_state.select(Some(app.create_playlist_selected_result));
+    added_state.select(
+      app
+        .create_playlist_selected_result
+        .checked_sub(added_offset),
+    );
   }
 
   let added_tracks_title = format!(

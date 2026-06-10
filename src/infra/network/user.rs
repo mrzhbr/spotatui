@@ -1,7 +1,7 @@
 use super::requests::is_rate_limited_error;
 use super::Network;
-use crate::core::app::{ActiveBlock, DiscoverTimeRange, RouteId};
-use crate::core::playback_target::PlaybackTarget;
+use crate::core::app::{ActiveBlock, App, DiscoverTimeRange, RouteId};
+use crate::core::playback_target::{parse_sonos_persisted_id, PlaybackTargetRef};
 use anyhow::anyhow;
 
 use rand::seq::SliceRandom;
@@ -20,6 +20,50 @@ use std::time::{Duration, Instant};
 #[derive(Deserialize)]
 struct ArtistTopTracksResponse {
   tracks: Vec<FullTrack>,
+}
+
+fn should_discover_sonos_for_devices(
+  selected_sonos_room_uuid: Option<&str>,
+  persisted_device_id: Option<&str>,
+  explicit_device_picker: bool,
+) -> bool {
+  explicit_device_picker
+    || selected_sonos_room_uuid.is_some()
+    || persisted_device_id.is_some_and(|device_id| parse_sonos_persisted_id(device_id).is_some())
+}
+
+fn refreshed_device_selection_index(app: &App, target_count: usize) -> Option<usize> {
+  if target_count == 0 {
+    return None;
+  }
+
+  if let Some(selected_uuid) = app.selected_sonos_room_uuid.as_deref() {
+    if let Some(index) = (0..target_count).position(|index| {
+      matches!(
+        app.playback_target_at(index),
+        Some(PlaybackTargetRef::Sonos { room, .. }) if room.uuid == selected_uuid
+      )
+    }) {
+      return Some(index);
+    }
+  } else if let Some(index) = (0..target_count).position(|index| {
+    matches!(
+      app.playback_target_at(index),
+      Some(PlaybackTargetRef::Spotify {
+        is_active: true,
+        ..
+      })
+    )
+  }) {
+    return Some(index);
+  }
+
+  Some(
+    app
+      .selected_device_index
+      .unwrap_or(0)
+      .min(target_count.saturating_sub(1)),
+  )
 }
 
 pub trait UserNetwork {
@@ -59,9 +103,24 @@ impl UserNetwork for Network {
       app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
     }
 
-    let spotify_devices = self.spotify_get_typed::<DevicePayload>("me/player/devices", &[]);
-    let sonos_rooms = crate::infra::sonos::discover_rooms();
-    let (spotify_devices, sonos_rooms) = tokio::join!(spotify_devices, sonos_rooms);
+    let selected_sonos_room_uuid = {
+      let app = self.app.lock().await;
+      app.selected_sonos_room_uuid.clone()
+    };
+    let should_discover_sonos = should_discover_sonos_for_devices(
+      selected_sonos_room_uuid.as_deref(),
+      self.client_config.device_id.as_deref(),
+      true,
+    );
+
+    let spotify_devices = self
+      .spotify_get_typed::<DevicePayload>("me/player/devices", &[])
+      .await;
+    let sonos_rooms = if should_discover_sonos {
+      Some(crate::infra::sonos::discover_rooms().await)
+    } else {
+      None
+    };
 
     let mut app = self.app.lock().await;
 
@@ -69,67 +128,29 @@ impl UserNetwork for Network {
       app.devices = Some(result);
     }
 
-    match sonos_rooms {
-      Ok(rooms) => {
-        if rooms.is_empty() {
-          if app.sonos_rooms.is_empty()
-            && app
-              .devices
-              .as_ref()
-              .is_none_or(|payload| payload.devices.is_empty())
-          {
-            app.set_status_message(
-              "No Spotify or Sonos devices found. Make sure a device is active and Sonos is on this network.",
-              6,
-            );
+    if let Some(sonos_rooms) = sonos_rooms {
+      match sonos_rooms {
+        Ok(rooms) => {
+          if !rooms.is_empty() {
+            app.sonos_rooms = rooms;
           }
-        } else {
-          app.sonos_rooms = rooms;
         }
-      }
-      Err(e) => {
-        if app.sonos_rooms.is_empty()
-          && app
-            .devices
-            .as_ref()
-            .is_none_or(|payload| payload.devices.is_empty())
-        {
+        Err(e) if app.selected_sonos_room_uuid.is_some() => {
           app.set_status_message(format!("No Sonos rooms found via SSDP: {e}"), 6);
         }
+        Err(_) => {}
       }
     }
 
-    let targets = app.playback_targets();
-    app.selected_device_index = if targets.is_empty() {
-      None
-    } else if let Some(selected_uuid) = app.selected_sonos_room_uuid.as_deref() {
-      targets
-        .iter()
-        .position(|target| {
-          matches!(target, PlaybackTarget::Sonos { room, .. } if room.uuid == selected_uuid)
-        })
-        .or_else(|| Some(app.selected_device_index.unwrap_or(0).min(targets.len() - 1)))
-    } else {
-      targets
-        .iter()
-        .position(|target| {
-          matches!(
-            target,
-            PlaybackTarget::Spotify {
-              is_active: true,
-              ..
-            }
-          )
-        })
-        .or_else(|| {
-          Some(
-            app
-              .selected_device_index
-              .unwrap_or(0)
-              .min(targets.len() - 1),
-          )
-        })
-    };
+    let target_count = app.playback_target_count();
+    if target_count == 0 {
+      app.set_status_message(
+        "No Spotify devices found. Make sure a device is active in Spotify.",
+        6,
+      );
+    }
+
+    app.selected_device_index = refreshed_device_selection_index(&app, target_count);
   }
 
   async fn get_user_top_tracks(&mut self, time_range: DiscoverTimeRange) {
@@ -236,5 +257,129 @@ impl UserNetwork for Network {
         self.handle_error(anyhow!(e)).await;
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::playback_target::{sonos_persisted_id, SonosRoom};
+  use crate::core::user_config::UserConfig;
+  use rspotify::model::{Device, DeviceType};
+  use std::{sync::mpsc::channel, time::SystemTime};
+
+  fn app() -> App {
+    let (tx, _rx) = channel();
+    App::new(tx, UserConfig::new(), SystemTime::now())
+  }
+
+  fn spotify_device(id: Option<&str>, name: &str, is_active: bool) -> Device {
+    Device {
+      id: id.map(ToString::to_string),
+      is_active,
+      is_private_session: false,
+      is_restricted: false,
+      name: name.to_string(),
+      _type: DeviceType::Computer,
+      volume_percent: Some(50),
+    }
+  }
+
+  #[test]
+  fn sonos_discovery_is_skipped_without_selected_or_persisted_sonos_target() {
+    assert!(!should_discover_sonos_for_devices(None, None, false));
+    assert!(!should_discover_sonos_for_devices(
+      None,
+      Some("spotify-device-id"),
+      false
+    ));
+  }
+
+  #[test]
+  fn sonos_discovery_runs_for_explicit_device_picker() {
+    assert!(should_discover_sonos_for_devices(None, None, true));
+  }
+
+  #[test]
+  fn sonos_discovery_runs_when_sonos_room_is_selected() {
+    assert!(should_discover_sonos_for_devices(
+      Some("RINCON_SELECTED"),
+      None,
+      false
+    ));
+  }
+
+  #[test]
+  fn sonos_discovery_runs_when_sonos_device_is_persisted() {
+    let persisted_id = sonos_persisted_id("RINCON_PERSISTED");
+
+    assert!(should_discover_sonos_for_devices(
+      None,
+      Some(&persisted_id),
+      false
+    ));
+  }
+
+  #[test]
+  fn refreshed_device_selection_prefers_selected_sonos_room() {
+    let mut app = app();
+    app.devices = Some(DevicePayload {
+      devices: vec![spotify_device(Some("spotify-1"), "Desktop", true)],
+    });
+    app.sonos_rooms = vec![
+      SonosRoom {
+        uuid: "RINCON_OTHER".to_string(),
+        name: "Kitchen".to_string(),
+        location: "http://192.168.1.10:1400/xml/device_description.xml".to_string(),
+      },
+      SonosRoom {
+        uuid: "RINCON_SELECTED".to_string(),
+        name: "Living Room".to_string(),
+        location: "http://192.168.1.20:1400/xml/device_description.xml".to_string(),
+      },
+    ];
+    app.selected_sonos_room_uuid = Some("RINCON_SELECTED".to_string());
+
+    assert_eq!(
+      refreshed_device_selection_index(&app, app.playback_target_count()),
+      Some(2)
+    );
+  }
+
+  #[test]
+  fn refreshed_device_selection_prefers_active_spotify_device_without_sonos_selection() {
+    let mut app = app();
+    app.devices = Some(DevicePayload {
+      devices: vec![
+        spotify_device(Some("spotify-1"), "Desktop", false),
+        spotify_device(None, "Nameless", true),
+        spotify_device(Some("spotify-2"), "Phone", true),
+      ],
+    });
+    app.sonos_rooms.push(SonosRoom {
+      uuid: "RINCON_123".to_string(),
+      name: "Living Room".to_string(),
+      location: "http://192.168.1.20:1400/xml/device_description.xml".to_string(),
+    });
+
+    assert_eq!(
+      refreshed_device_selection_index(&app, app.playback_target_count()),
+      Some(1)
+    );
+  }
+
+  #[test]
+  fn refreshed_device_selection_clamps_previous_index_when_preferred_target_is_missing() {
+    let mut app = app();
+    app.selected_device_index = Some(9);
+    app.selected_sonos_room_uuid = Some("RINCON_MISSING".to_string());
+    app.devices = Some(DevicePayload {
+      devices: vec![spotify_device(Some("spotify-1"), "Desktop", false)],
+    });
+
+    assert_eq!(
+      refreshed_device_selection_index(&app, app.playback_target_count()),
+      Some(0)
+    );
   }
 }

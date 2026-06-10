@@ -11,8 +11,8 @@ use rspotify::model::PlayableItem;
 use rspotify::prelude::Id;
 
 use super::util::{
-  create_artist_string, draw_selectable_list, get_color, get_search_results_highlight_state,
-  SMALL_TERMINAL_WIDTH,
+  append_artist_string, draw_selectable_list_with, get_color, get_search_results_highlight_state,
+  SelectableListOptions, SMALL_TERMINAL_WIDTH,
 };
 
 const COMPACT_TOP_ROW_THRESHOLD: u16 = 60;
@@ -63,7 +63,7 @@ pub fn draw_input_and_help_box(f: &mut Frame<'_>, app: &App, layout_chunk: Rect)
   };
 
   let input_string: String = app.input.iter().collect();
-  let lines = Text::from(input_string.clone());
+  let lines = Text::from(input_string);
   // Compute horizontal scroll so the cursor stays visible within the input box.
   // inner width = total width - 2 (for left and right borders)
   let inner_width = input_area.width.saturating_sub(2);
@@ -114,15 +114,12 @@ pub fn draw_input_and_help_box(f: &mut Frame<'_>, app: &App, layout_chunk: Rect)
   );
   f.render_widget(help, help_area);
 
-  let settings_keybind_string = app
-    .effective_open_settings_key()
-    .to_string()
-    .trim_matches(|c| c == '<' || c == '>')
-    .to_string();
+  let settings_keybind_string = app.effective_open_settings_key().to_string();
+  let settings_keybind = settings_keybind_string.trim_matches(|c| c == '<' || c == '>');
   let settings_hint = if compact_top_row {
-    settings_keybind_string
+    Text::from(settings_keybind)
   } else {
-    format!("Type {}", settings_keybind_string)
+    Text::from(format!("Type {settings_keybind}"))
   };
   let settings_color = app.user_config.theme.inactive;
   let settings_block = Block::default()
@@ -158,76 +155,90 @@ pub fn draw_search_results(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
 
     let currently_playing_id = app
       .current_playback_context
-      .clone()
-      .and_then(|context| {
-        context.item.and_then(|item| match item {
-          PlayableItem::Track(track) => track.id.map(|id| id.id().to_string()),
-          PlayableItem::Episode(episode) => Some(episode.id.id().to_string()),
-          _ => None,
-        })
-      })
-      .unwrap_or_default();
+      .as_ref()
+      .and_then(|context| context.item.as_ref())
+      .and_then(|item| match item {
+        PlayableItem::Track(track) => track.id.as_ref().map(|id| id.id()),
+        PlayableItem::Episode(episode) => Some(episode.id.id()),
+        _ => None,
+      });
 
-    let songs = match &app.search_results.tracks {
-      Some(tracks) => tracks
-        .items
-        .iter()
-        .map(|item| {
-          let mut song_name = "".to_string();
-          let id = item
-            .clone()
-            .id
-            .map(|id| id.id().to_string())
-            .unwrap_or_else(|| "".to_string());
-          if currently_playing_id == id {
-            song_name += "▶ "
-          }
-          if app.liked_song_ids_set.contains(&id) {
-            song_name += &app.user_config.padded_liked_icon();
-          }
-
-          song_name += &item.name;
-          song_name += &format!(" - {}", &create_artist_string(&item.artists));
-          song_name
-        })
-        .collect(),
-      None => vec![],
-    };
-
-    draw_selectable_list(
+    let song_count = app
+      .search_results
+      .tracks
+      .as_ref()
+      .map(|tracks| tracks.items.len())
+      .unwrap_or(0);
+    draw_selectable_list_with(
       f,
       app,
       songs_area,
-      "Songs",
-      &songs,
-      get_search_results_highlight_state(app, SearchResultBlock::SongSearch),
-      app.search_results.selected_tracks_index,
+      SelectableListOptions {
+        title: "Songs",
+        item_count: song_count,
+        highlight_state: get_search_results_highlight_state(app, SearchResultBlock::SongSearch),
+        selected_index: app.search_results.selected_tracks_index,
+      },
+      |index| {
+        let Some(item) = app
+          .search_results
+          .tracks
+          .as_ref()
+          .and_then(|tracks| tracks.items.get(index))
+        else {
+          return String::new();
+        };
+
+        let item_id = item.id.as_ref().map(|id| id.id());
+        let mut song_name = String::new();
+        if item_id.is_some_and(|id| currently_playing_id == Some(id)) {
+          song_name.push_str("▶ ");
+        }
+        if item_id.is_some_and(|id| app.liked_song_ids_set.contains(id)) {
+          song_name.push_str(&app.user_config.behavior.liked_icon);
+          song_name.push(' ');
+        }
+        song_name.push_str(&item.name);
+        song_name.push_str(" - ");
+        append_artist_string(&mut song_name, &item.artists);
+        song_name
+      },
     );
 
-    let artists = match &app.search_results.artists {
-      Some(artists) => artists
-        .items
-        .iter()
-        .map(|item| {
-          let mut artist = String::new();
-          if app.followed_artist_ids_set.contains(item.id.id()) {
-            artist.push_str(&app.user_config.padded_liked_icon());
-          }
-          artist.push_str(&item.name.to_owned());
-          artist
-        })
-        .collect(),
-      None => vec![],
-    };
-
-    draw_selectable_list(
+    let artist_count = app
+      .search_results
+      .artists
+      .as_ref()
+      .map(|artists| artists.items.len())
+      .unwrap_or(0);
+    draw_selectable_list_with(
       f,
       app,
       artists_area,
-      "Artists",
-      &artists,
-      get_search_results_highlight_state(app, SearchResultBlock::ArtistSearch),
-      app.search_results.selected_artists_index,
+      SelectableListOptions {
+        title: "Artists",
+        item_count: artist_count,
+        highlight_state: get_search_results_highlight_state(app, SearchResultBlock::ArtistSearch),
+        selected_index: app.search_results.selected_artists_index,
+      },
+      |index| {
+        let Some(item) = app
+          .search_results
+          .artists
+          .as_ref()
+          .and_then(|artists| artists.items.get(index))
+        else {
+          return String::new();
+        };
+
+        let mut artist = String::new();
+        if app.followed_artist_ids_set.contains(item.id.id()) {
+          artist.push_str(&app.user_config.behavior.liked_icon);
+          artist.push(' ');
+        }
+        artist.push_str(&item.name);
+        artist
+      },
     );
   }
 
@@ -237,49 +248,59 @@ pub fn draw_search_results(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       Constraint::Percentage(50),
     ]));
 
-    let albums = match &app.search_results.albums {
-      Some(albums) => albums
-        .items
-        .iter()
-        .map(|item| {
-          let mut album_artist = String::new();
-          if let Some(album_id) = &item.id {
-            if app.saved_album_ids_set.contains(album_id.id()) {
-              album_artist.push_str(&app.user_config.padded_liked_icon());
-            }
-          }
-          album_artist.push_str(&format!(
-            "{} - {} ({})",
-            item.name.to_owned(),
-            create_artist_string(&item.artists),
-            item.album_type.as_deref().unwrap_or("unknown")
-          ));
-          album_artist
-        })
-        .collect(),
-      None => vec![],
-    };
-
-    draw_selectable_list(
+    let album_count = app
+      .search_results
+      .albums
+      .as_ref()
+      .map(|albums| albums.items.len())
+      .unwrap_or(0);
+    draw_selectable_list_with(
       f,
       app,
       albums_area,
-      "Albums",
-      &albums,
-      get_search_results_highlight_state(app, SearchResultBlock::AlbumSearch),
-      app.search_results.selected_album_index,
+      SelectableListOptions {
+        title: "Albums",
+        item_count: album_count,
+        highlight_state: get_search_results_highlight_state(app, SearchResultBlock::AlbumSearch),
+        selected_index: app.search_results.selected_album_index,
+      },
+      |index| {
+        let Some(item) = app
+          .search_results
+          .albums
+          .as_ref()
+          .and_then(|albums| albums.items.get(index))
+        else {
+          return String::new();
+        };
+
+        let mut album_artist = String::new();
+        if item
+          .id
+          .as_ref()
+          .is_some_and(|album_id| app.saved_album_ids_set.contains(album_id.id()))
+        {
+          album_artist.push_str(&app.user_config.behavior.liked_icon);
+          album_artist.push(' ');
+        }
+        album_artist.push_str(&item.name);
+        album_artist.push_str(" - ");
+        append_artist_string(&mut album_artist, &item.artists);
+        album_artist.push_str(" (");
+        album_artist.push_str(item.album_type.as_deref().unwrap_or("unknown"));
+        album_artist.push(')');
+        album_artist
+      },
     );
 
-    let playlists = match &app.search_results.playlists {
-      Some(playlists) => playlists
-        .items
-        .iter()
-        .map(|item| item.name.to_owned())
-        .collect::<Vec<String>>(),
-      None => vec![],
-    };
+    let playlist_count = app
+      .search_results
+      .playlists
+      .as_ref()
+      .map(|playlists| playlists.items.len())
+      .unwrap_or(0);
 
-    if playlists.is_empty() {
+    if playlist_count == 0 {
       let warning_text = "Cannot display Spotify created playlists. Try a more specific search to find user-created playlists.";
       let warning_paragraph = Paragraph::new(warning_text)
         .wrap(Wrap { trim: true })
@@ -301,43 +322,70 @@ pub fn draw_search_results(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
         );
       f.render_widget(warning_paragraph, playlist_area);
     } else {
-      draw_selectable_list(
+      draw_selectable_list_with(
         f,
         app,
         playlist_area,
-        "Playlists",
-        &playlists,
-        get_search_results_highlight_state(app, SearchResultBlock::PlaylistSearch),
-        app.search_results.selected_playlists_index,
+        SelectableListOptions {
+          title: "Playlists",
+          item_count: playlist_count,
+          highlight_state: get_search_results_highlight_state(
+            app,
+            SearchResultBlock::PlaylistSearch,
+          ),
+          selected_index: app.search_results.selected_playlists_index,
+        },
+        |index| {
+          app
+            .search_results
+            .playlists
+            .as_ref()
+            .and_then(|playlists| playlists.items.get(index))
+            .map(|item| item.name.clone())
+            .unwrap_or_default()
+        },
       );
     }
   }
 
   {
-    draw_selectable_list(
+    let podcast_count = app
+      .search_results
+      .shows
+      .as_ref()
+      .map(|podcasts| podcasts.items.len())
+      .unwrap_or(0);
+    draw_selectable_list_with(
       f,
       app,
       podcasts_area,
-      "Podcasts",
-      &match &app.search_results.shows {
-        Some(podcasts) => podcasts
-          .items
-          .iter()
-          .map(|item| {
-            let mut show_name = String::new();
-            if app.saved_show_ids_set.contains(item.id.id()) {
-              show_name.push_str(&app.user_config.padded_liked_icon());
-            }
-            #[allow(deprecated)]
-            let publisher = &item.publisher;
-            show_name.push_str(&format!("{:} - {}", item.name, publisher));
-            show_name
-          })
-          .collect(),
-        None => vec![],
+      SelectableListOptions {
+        title: "Podcasts",
+        item_count: podcast_count,
+        highlight_state: get_search_results_highlight_state(app, SearchResultBlock::ShowSearch),
+        selected_index: app.search_results.selected_shows_index,
       },
-      get_search_results_highlight_state(app, SearchResultBlock::ShowSearch),
-      app.search_results.selected_shows_index,
+      |index| {
+        let Some(item) = app
+          .search_results
+          .shows
+          .as_ref()
+          .and_then(|podcasts| podcasts.items.get(index))
+        else {
+          return String::new();
+        };
+
+        let mut show_name = String::new();
+        if app.saved_show_ids_set.contains(item.id.id()) {
+          show_name.push_str(&app.user_config.behavior.liked_icon);
+          show_name.push(' ');
+        }
+        show_name.push_str(&item.name);
+        show_name.push_str(" - ");
+        #[allow(deprecated)]
+        show_name.push_str(&item.publisher);
+        show_name
+      },
     );
   }
 }

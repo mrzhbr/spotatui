@@ -300,24 +300,35 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
     }
     SearchResultBlock::SongSearch => {
       let index = app.search_results.selected_tracks_index;
-      let tracks = app.search_results.tracks.clone();
-      let track_ids: Option<Vec<PlayableId<'static>>> = tracks.map(|tracks| {
+      let track_ids = app.search_results.tracks.as_ref().map(|tracks| {
         tracks
           .items
-          .into_iter()
-          .filter_map(|track| track.id.map(|id| PlayableId::Track(id.into_static())))
+          .iter()
+          .filter_map(|track| {
+            track
+              .id
+              .as_ref()
+              .map(|id| PlayableId::Track(id.clone().into_static()))
+          })
           .collect()
       });
       app.dispatch(IoEvent::StartPlayback(None, track_ids, index));
     }
     SearchResultBlock::ArtistSearch => {
-      if let Some(index) = &app.search_results.selected_artists_index {
-        if let Some(result) = app.search_results.artists.clone() {
-          if let Some(artist) = result.items.get(index.to_owned()) {
-            app.get_artist(artist.id.as_ref().into_static(), artist.name.clone());
-          };
-        };
-      };
+      let selected_artist = app
+        .search_results
+        .selected_artists_index
+        .and_then(|index| {
+          app
+            .search_results
+            .artists
+            .as_ref()
+            .and_then(|result| result.items.get(index))
+        })
+        .map(|artist| (artist.id.as_ref().into_static(), artist.name.clone()));
+      if let Some((artist_id, artist_name)) = selected_artist {
+        app.get_artist(artist_id, artist_name);
+      }
     }
     SearchResultBlock::PlaylistSearch => {
       if let (Some(index), Some(playlists_result)) = (
@@ -387,30 +398,45 @@ fn handle_recommended_tracks(app: &mut App) {
   match app.search_results.selected_block {
     SearchResultBlock::AlbumSearch => {}
     SearchResultBlock::SongSearch => {
-      if let Some(index) = &app.search_results.selected_tracks_index {
-        if let Some(result) = app.search_results.tracks.clone() {
-          if let Some(track) = result.items.get(index.to_owned()) {
-            let track_id_list: Option<Vec<String>> =
-              track.id.as_ref().map(|id| vec![id.id().to_string()]);
+      let selected_track = app
+        .search_results
+        .selected_tracks_index
+        .and_then(|index| {
+          app
+            .search_results
+            .tracks
+            .as_ref()
+            .and_then(|result| result.items.get(index))
+        })
+        .map(|track| {
+          let track_id_list = track.id.as_ref().map(|id| vec![id.id().to_string()]);
+          (track.name.clone(), track_id_list, track.clone())
+        });
 
-            app.recommendations_context = Some(RecommendationsContext::Song);
-            app.recommendations_seed = track.name.clone();
-            app.get_recommendations_for_seed(None, track_id_list, Some(track.clone()));
-          };
-        };
-      };
+      if let Some((track_name, track_id_list, seed_track)) = selected_track {
+        app.recommendations_context = Some(RecommendationsContext::Song);
+        app.recommendations_seed = track_name;
+        app.get_recommendations_for_seed(None, track_id_list, Some(seed_track));
+      }
     }
     SearchResultBlock::ArtistSearch => {
-      if let Some(index) = &app.search_results.selected_artists_index {
-        if let Some(result) = app.search_results.artists.clone() {
-          if let Some(artist) = result.items.get(index.to_owned()) {
-            let artist_id_list: Option<Vec<String>> = Some(vec![artist.id.id().to_string()]);
-            app.recommendations_context = Some(RecommendationsContext::Artist);
-            app.recommendations_seed = artist.name.clone();
-            app.get_recommendations_for_seed(artist_id_list, None, None);
-          };
-        };
-      };
+      let selected_artist = app
+        .search_results
+        .selected_artists_index
+        .and_then(|index| {
+          app
+            .search_results
+            .artists
+            .as_ref()
+            .and_then(|result| result.items.get(index))
+        })
+        .map(|artist| (artist.name.clone(), vec![artist.id.id().to_string()]));
+
+      if let Some((artist_name, artist_id_list)) = selected_artist {
+        app.recommendations_context = Some(RecommendationsContext::Artist);
+        app.recommendations_seed = artist_name;
+        app.get_recommendations_for_seed(Some(artist_id_list), None, None);
+      }
     }
     SearchResultBlock::PlaylistSearch => {}
     SearchResultBlock::ShowSearch => {}
@@ -524,14 +550,15 @@ pub fn handler(key: Key, app: &mut App) {
           &app.search_results.playlists,
           app.search_results.selected_playlists_index,
         ) {
-          let selected_playlist = &playlists.items[selected_index].name;
-          app.dialog = Some(selected_playlist.clone());
-          app.confirm = false;
+          if let Some(selected_playlist) = playlists.items.get(selected_index) {
+            app.dialog = Some(selected_playlist.name.to_owned());
+            app.confirm = false;
 
-          app.push_navigation_stack(
-            RouteId::Dialog,
-            ActiveBlock::Dialog(DialogContext::PlaylistSearch),
-          );
+            app.push_navigation_stack(
+              RouteId::Dialog,
+              ActiveBlock::Dialog(DialogContext::PlaylistSearch),
+            );
+          }
         }
       }
       SearchResultBlock::ShowSearch => app.user_unfollow_show(ActiveBlock::SearchResultBlock),

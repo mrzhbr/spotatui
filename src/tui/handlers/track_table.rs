@@ -232,7 +232,7 @@ fn play_random_song(app: &mut App) {
             None,
             Some(playable_ids),
             Some(rand_idx),
-          ))
+          ));
         }
       }
       TrackTableContext::AlbumSearch => {}

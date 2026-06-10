@@ -1,29 +1,11 @@
 #![cfg_attr(
-  not(any(
-    feature = "discord-rpc",
-    all(feature = "mpris", target_os = "linux"),
-    all(feature = "macos-media", target_os = "macos")
-  )),
+  not(all(feature = "macos-media", target_os = "macos")),
   allow(dead_code)
 )]
 
-use crate::core::app::{App, NativePlaybackOrigin, NativeTrackKind};
+use crate::core::app::App;
 use crate::tui::ui::util::create_artist_string;
-use rspotify::model::{PlayableItem, RepeatState};
-use rspotify::prelude::Id;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaybackItemKind {
-  Track,
-  Episode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaybackSource {
-  NativeContext,
-  NativeRawList,
-  ExternalDevice,
-}
+use rspotify::model::{FullEpisode, FullTrack, PlayableItem};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaybackMetadata {
@@ -34,150 +16,48 @@ pub struct PlaybackMetadata {
   pub duration_ms: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PlaybackSnapshot {
-  pub metadata: PlaybackMetadata,
-  pub item_kind: PlaybackItemKind,
-  pub item_id: Option<String>,
-  pub item_uri: Option<String>,
-  pub context_uri: Option<String>,
-  pub source: PlaybackSource,
-  pub progress_ms: u128,
-  pub is_playing: bool,
-  pub shuffle: bool,
-  pub repeat: Option<RepeatState>,
-}
-
-impl PlaybackSnapshot {
-  pub fn primary_artist(&self) -> String {
-    self.metadata.artists.join(", ")
-  }
-}
-
-pub fn current_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
+pub fn current_playback_metadata(app: &App) -> Option<PlaybackMetadata> {
   let context = app.current_playback_context.as_ref();
-  let use_native_metadata = app.is_streaming_active && app.native_track_info.is_some();
-
-  let (metadata, item_kind, item_id, item_uri) = if use_native_metadata {
-    let native_info = app.native_track_info.as_ref()?;
-    let item_kind = match native_info.kind {
-      NativeTrackKind::Track => PlaybackItemKind::Track,
-      NativeTrackKind::Episode => PlaybackItemKind::Episode,
-    };
-    let item_id = app.last_track_id.clone();
-    let item_uri = item_id
-      .as_deref()
-      .map(|id| playback_uri_for_item_kind(item_kind, id));
-    (
-      PlaybackMetadata {
+  if app.is_streaming_active {
+    if let Some(native_info) = app.native_track_info.as_ref() {
+      return Some(PlaybackMetadata {
         title: native_info.name.clone(),
         artists: vec![native_info.artists_display.clone()],
         album: native_info.album.clone(),
         image_url: image_url_from_context_item(context.and_then(|ctx| ctx.item.as_ref())),
         duration_ms: native_info.duration_ms,
-      },
-      item_kind,
-      item_id,
-      item_uri,
-    )
-  } else {
-    metadata_and_identity_from_context_item(context.and_then(|ctx| ctx.item.as_ref()))?
-  };
-
-  let is_playing = if use_native_metadata {
-    app
-      .native_is_playing
-      .unwrap_or_else(|| context.map(|context| context.is_playing).unwrap_or(false))
-  } else {
-    context.map(|context| context.is_playing).unwrap_or(false)
-  };
-  let shuffle = context
-    .map(|context| context.shuffle_state)
-    .unwrap_or(app.user_config.behavior.shuffle_enabled);
-  let repeat = context.map(|context| context.repeat_state);
-  let context_uri = context
-    .and_then(|ctx| ctx.context.as_ref())
-    .map(|context| context.uri.clone());
-  let source = if app.is_streaming_active {
-    match app.native_playback_origin.unwrap_or_else(|| {
-      if context_uri.is_some() {
-        NativePlaybackOrigin::Context
-      } else {
-        NativePlaybackOrigin::RawList
-      }
-    }) {
-      NativePlaybackOrigin::Context => PlaybackSource::NativeContext,
-      NativePlaybackOrigin::RawList => PlaybackSource::NativeRawList,
+      });
     }
-  } else {
-    PlaybackSource::ExternalDevice
-  };
+  }
 
-  Some(PlaybackSnapshot {
-    metadata,
-    item_kind,
-    item_id,
-    item_uri,
-    context_uri,
-    source,
-    progress_ms: app.song_progress_ms,
-    is_playing,
-    shuffle,
-    repeat,
-  })
+  metadata_from_context_item(context.and_then(|ctx| ctx.item.as_ref()))
 }
 
-fn metadata_and_identity_from_context_item(
-  item: Option<&PlayableItem>,
-) -> Option<(
-  PlaybackMetadata,
-  PlaybackItemKind,
-  Option<String>,
-  Option<String>,
-)> {
-  match item? {
-    PlayableItem::Track(track) => {
-      let item_id = track.id.as_ref().map(|id| id.id().to_string());
-      Some((
-        PlaybackMetadata {
-          title: track.name.clone(),
-          artists: vec![create_artist_string(&track.artists)],
-          album: track.album.name.clone(),
-          image_url: track.album.images.first().map(|image| image.url.clone()),
-          duration_ms: track.duration.num_milliseconds() as u32,
-        },
-        PlaybackItemKind::Track,
-        item_id.clone(),
-        item_id
-          .as_deref()
-          .map(|id| playback_uri_for_item_kind(PlaybackItemKind::Track, id)),
-      ))
-    }
-    PlayableItem::Episode(episode) => {
-      let item_id = Some(episode.id.id().to_string());
-      Some((
-        PlaybackMetadata {
-          title: episode.name.clone(),
-          artists: vec![episode.show.name.clone()],
-          album: String::new(),
-          image_url: episode.images.first().map(|image| image.url.clone()),
-          duration_ms: episode.duration.num_milliseconds() as u32,
-        },
-        PlaybackItemKind::Episode,
-        item_id.clone(),
-        item_id
-          .as_deref()
-          .map(|id| playback_uri_for_item_kind(PlaybackItemKind::Episode, id)),
-      ))
-    }
-    PlayableItem::Unknown(_) => None,
+fn metadata_from_track(track: &FullTrack) -> PlaybackMetadata {
+  PlaybackMetadata {
+    title: track.name.clone(),
+    artists: vec![create_artist_string(&track.artists)],
+    album: track.album.name.clone(),
+    image_url: track.album.images.first().map(|image| image.url.clone()),
+    duration_ms: track.duration.num_milliseconds() as u32,
   }
 }
 
-fn playback_uri_for_item_kind(item_kind: PlaybackItemKind, id: &str) -> String {
-  match item_kind {
-    PlaybackItemKind::Track => format!("spotify:track:{id}"),
-    PlaybackItemKind::Episode => format!("spotify:episode:{id}"),
+fn metadata_from_episode(episode: &FullEpisode) -> PlaybackMetadata {
+  PlaybackMetadata {
+    title: episode.name.clone(),
+    artists: vec![episode.show.name.clone()],
+    album: String::new(),
+    image_url: episode.images.first().map(|image| image.url.clone()),
+    duration_ms: episode.duration.num_milliseconds() as u32,
+  }
+}
+
+fn metadata_from_context_item(item: Option<&PlayableItem>) -> Option<PlaybackMetadata> {
+  match item? {
+    PlayableItem::Track(track) => Some(metadata_from_track(track)),
+    PlayableItem::Episode(episode) => Some(metadata_from_episode(episode)),
+    PlayableItem::Unknown(_) => None,
   }
 }
 
@@ -192,7 +72,7 @@ fn image_url_from_context_item(item: Option<&PlayableItem>) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::core::app::{NativePlaybackOrigin, NativeTrackInfo, NativeTrackKind};
+  use crate::core::app::NativeTrackInfo;
   use chrono::{Duration, Utc};
   use rspotify::model::{
     context::{Actions, CurrentPlaybackContext},
@@ -322,28 +202,37 @@ mod tests {
   #[test]
   fn extracts_native_track_info() {
     let mut app = app();
-    app.song_progress_ms = 12_000;
     app.is_streaming_active = true;
-    app.native_is_playing = Some(true);
     app.native_track_info = Some(NativeTrackInfo {
       name: "Native Track".to_string(),
       artists_display: "Native Artist".to_string(),
       album: "Native Album".to_string(),
       duration_ms: 123_000,
-      kind: NativeTrackKind::Track,
     });
-    app.native_playback_origin = Some(NativePlaybackOrigin::RawList);
 
-    let snapshot = current_playback_snapshot(&app).unwrap();
+    let metadata = current_playback_metadata(&app).unwrap();
 
-    assert_eq!(snapshot.metadata.title, "Native Track");
-    assert_eq!(snapshot.metadata.artists, vec!["Native Artist"]);
-    assert_eq!(snapshot.metadata.album, "Native Album");
-    assert_eq!(snapshot.metadata.duration_ms, 123_000);
-    assert_eq!(snapshot.item_kind, PlaybackItemKind::Track);
-    assert_eq!(snapshot.source, PlaybackSource::NativeRawList);
-    assert_eq!(snapshot.progress_ms, 12_000);
-    assert!(snapshot.is_playing);
+    assert_eq!(metadata.title, "Native Track");
+    assert_eq!(metadata.artists, vec!["Native Artist"]);
+    assert_eq!(metadata.album, "Native Album");
+    assert_eq!(metadata.duration_ms, 123_000);
+  }
+
+  #[test]
+  fn extracts_metadata_without_building_snapshot_identity() {
+    let mut app = app();
+    app.current_playback_context = Some(playback_context(PlayableItem::Track(track()), true));
+
+    let metadata = current_playback_metadata(&app).unwrap();
+
+    assert_eq!(metadata.title, "Track");
+    assert_eq!(metadata.artists, vec!["Artist"]);
+    assert_eq!(metadata.album, "Album");
+    assert_eq!(
+      metadata.image_url.as_deref(),
+      Some("https://example.com/cover.jpg")
+    );
+    assert_eq!(metadata.duration_ms, 181_000);
   }
 
   #[test]
@@ -352,10 +241,9 @@ mod tests {
     app.native_is_playing = Some(false);
     app.current_playback_context = Some(playback_context(PlayableItem::Track(track()), true));
 
-    let snapshot = current_playback_snapshot(&app).unwrap();
+    let metadata = current_playback_metadata(&app).unwrap();
 
-    assert_eq!(snapshot.metadata.title, "Track");
-    assert!(snapshot.is_playing);
+    assert_eq!(metadata.title, "Track");
   }
 
   #[test]
@@ -367,33 +255,29 @@ mod tests {
       artists_display: "Native Artist".to_string(),
       album: "Native Album".to_string(),
       duration_ms: 123_000,
-      kind: NativeTrackKind::Track,
     });
     app.current_playback_context = Some(playback_context(PlayableItem::Track(track()), true));
 
-    let snapshot = current_playback_snapshot(&app).unwrap();
+    let metadata = current_playback_metadata(&app).unwrap();
 
-    assert_eq!(snapshot.metadata.title, "Track");
-    assert!(snapshot.is_playing);
+    assert_eq!(metadata.title, "Track");
   }
 
   #[test]
   fn extracts_spotify_track() {
     let mut app = app();
-    app.song_progress_ms = 32_000;
     app.current_playback_context = Some(playback_context(PlayableItem::Track(track()), true));
 
-    let snapshot = current_playback_snapshot(&app).unwrap();
+    let metadata = current_playback_metadata(&app).unwrap();
 
-    assert_eq!(snapshot.metadata.title, "Track");
-    assert_eq!(snapshot.metadata.artists, vec!["Artist"]);
-    assert_eq!(snapshot.metadata.album, "Album");
+    assert_eq!(metadata.title, "Track");
+    assert_eq!(metadata.artists, vec!["Artist"]);
+    assert_eq!(metadata.album, "Album");
     assert_eq!(
-      snapshot.metadata.image_url.as_deref(),
+      metadata.image_url.as_deref(),
       Some("https://example.com/cover.jpg")
     );
-    assert_eq!(snapshot.metadata.duration_ms, 181_000);
-    assert!(snapshot.shuffle);
+    assert_eq!(metadata.duration_ms, 181_000);
   }
 
   #[test]
@@ -401,23 +285,22 @@ mod tests {
     let mut app = app();
     app.current_playback_context = Some(playback_context(PlayableItem::Episode(episode()), false));
 
-    let snapshot = current_playback_snapshot(&app).unwrap();
+    let metadata = current_playback_metadata(&app).unwrap();
 
-    assert_eq!(snapshot.metadata.title, "Episode");
-    assert_eq!(snapshot.metadata.artists, vec!["Show"]);
-    assert_eq!(snapshot.metadata.album, "");
+    assert_eq!(metadata.title, "Episode");
+    assert_eq!(metadata.artists, vec!["Show"]);
+    assert_eq!(metadata.album, "");
     assert_eq!(
-      snapshot.metadata.image_url.as_deref(),
+      metadata.image_url.as_deref(),
       Some("https://example.com/episode.jpg")
     );
-    assert_eq!(snapshot.metadata.duration_ms, 2_400_000);
-    assert!(!snapshot.is_playing);
+    assert_eq!(metadata.duration_ms, 2_400_000);
   }
 
   #[test]
-  fn empty_playback_has_no_snapshot() {
+  fn empty_playback_has_no_metadata() {
     let app = app();
 
-    assert_eq!(current_playback_snapshot(&app), None);
+    assert_eq!(current_playback_metadata(&app), None);
   }
 }

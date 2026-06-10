@@ -495,6 +495,11 @@ impl StreamingPlayer {
     &self.config.device_name
   }
 
+  /// Get librespot's session device id for diagnostics and Connect matching.
+  pub fn device_id(&self) -> String {
+    self.session.device_id().to_string()
+  }
+
   /// Check if the session is connected
   pub fn is_connected(&self) -> bool {
     self.spirc_alive.load(Ordering::Relaxed)
@@ -545,7 +550,12 @@ impl StreamingPlayer {
   pub fn play(&self) {
     // Prefer going through Spirc so Connect state stays consistent.
     // Also call the underlying player directly as a best-effort fallback.
-    let _ = self.spirc.play();
+    if let Err(error) = self.spirc.play() {
+      warn!(
+        "native streaming Spirc play failed: {:?}; falling back to direct player.play",
+        error
+      );
+    }
     self.player.play();
   }
 
@@ -598,7 +608,7 @@ impl StreamingPlayer {
     Ok(())
   }
 
-  /// Set repeat mode directly to a specific state (for MPRIS)
+  /// Set repeat mode directly to a specific state.
   pub fn set_repeat_mode(&self, target_state: rspotify::model::enums::RepeatState) -> Result<()> {
     use rspotify::model::enums::RepeatState;
 
@@ -643,7 +653,9 @@ impl StreamingPlayer {
 
   /// Activate the device (make it the active playback device)
   pub fn activate(&self) {
-    let _ = self.spirc.activate();
+    if let Err(error) = self.spirc.activate() {
+      warn!("native streaming Spirc activate failed: {:?}", error);
+    }
   }
 
   /// Transfer playback to this device via Spotify Connect.

@@ -1,378 +1,381 @@
 use crate::core::app::App;
+use std::borrow::Cow;
 
-pub fn get_help_docs(app: &App) -> Vec<Vec<String>> {
+pub type HelpDocRow = [Cow<'static, str>; 3];
+
+#[cfg(feature = "cover-art")]
+pub const HELP_DOCS_LEN: usize = 71;
+#[cfg(not(feature = "cover-art"))]
+pub const HELP_DOCS_LEN: usize = 70;
+
+pub fn get_help_docs(app: &App) -> Vec<HelpDocRow> {
   let key_bindings = &app.user_config.keys;
   vec![
-    vec![
-      String::from("Scroll down to next result page"),
-      key_bindings.next_page.to_string(),
-      String::from("Pagination"),
+    [
+      Cow::Borrowed("Scroll down to next result page"),
+      Cow::Owned(key_bindings.next_page.to_string()),
+      Cow::Borrowed("Pagination"),
     ],
-    vec![
-      String::from("Scroll up to previous result page"),
-      key_bindings.previous_page.to_string(),
-      String::from("Pagination"),
+    [
+      Cow::Borrowed("Scroll up to previous result page"),
+      Cow::Owned(key_bindings.previous_page.to_string()),
+      Cow::Borrowed("Pagination"),
     ],
-    vec![
-      String::from("Jump to start of playlist"),
-      key_bindings.jump_to_start.to_string(),
-      String::from("Pagination"),
+    [
+      Cow::Borrowed("Jump to start of playlist"),
+      Cow::Owned(key_bindings.jump_to_start.to_string()),
+      Cow::Borrowed("Pagination"),
     ],
-    vec![
-      String::from("Jump to end of playlist"),
-      key_bindings.jump_to_end.to_string(),
-      String::from("Pagination"),
+    [
+      Cow::Borrowed("Jump to end of playlist"),
+      Cow::Owned(key_bindings.jump_to_end.to_string()),
+      Cow::Borrowed("Pagination"),
     ],
-    vec![
-      String::from("Jump to currently playing album"),
-      key_bindings.jump_to_album.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Jump to currently playing album"),
+      Cow::Owned(key_bindings.jump_to_album.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Jump to currently playing artist's album list"),
-      key_bindings.jump_to_artist_album.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Jump to currently playing artist's album list"),
+      Cow::Owned(key_bindings.jump_to_artist_album.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Jump to current play context"),
-      key_bindings.jump_to_context.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Jump to current play context"),
+      Cow::Owned(key_bindings.jump_to_context.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Increase volume by 10%"),
-      key_bindings.increase_volume.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Increase volume by 10%"),
+      Cow::Owned(key_bindings.increase_volume.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Decrease volume by 10%"),
-      key_bindings.decrease_volume.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Decrease volume by 10%"),
+      Cow::Owned(key_bindings.decrease_volume.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Skip to next track"),
-      key_bindings.next_track.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Skip to next track"),
+      Cow::Owned(key_bindings.next_track.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Skip to previous track"),
-      key_bindings.previous_track.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Skip to previous track"),
+      Cow::Owned(key_bindings.previous_track.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Force skip to previous track"),
-      key_bindings.force_previous_track.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Force skip to previous track"),
+      Cow::Owned(key_bindings.force_previous_track.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Seek backwards 5 seconds"),
-      key_bindings.seek_backwards.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Seek backwards 5 seconds"),
+      Cow::Owned(key_bindings.seek_backwards.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Seek forwards 5 seconds"),
-      key_bindings.seek_forwards.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Seek forwards 5 seconds"),
+      Cow::Owned(key_bindings.seek_forwards.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Toggle shuffle"),
-      key_bindings.shuffle.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Toggle shuffle"),
+      Cow::Owned(key_bindings.shuffle.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Copy url to currently playing song/episode"),
-      key_bindings.copy_song_url.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Copy url to currently playing song/episode"),
+      Cow::Owned(key_bindings.copy_song_url.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Copy url to currently playing album/show"),
-      key_bindings.copy_album_url.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Copy url to currently playing album/show"),
+      Cow::Owned(key_bindings.copy_album_url.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Cycle repeat mode"),
-      key_bindings.repeat.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Cycle repeat mode"),
+      Cow::Owned(key_bindings.repeat.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Move selection left"),
-      String::from("h | <Left Arrow Key> | <Ctrl+b>"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Move selection left"),
+      Cow::Borrowed("h | <Left Arrow Key> | <Ctrl+b>"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Move selection down"),
-      String::from("j | <Down Arrow Key> | <Ctrl+n>"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Move selection down"),
+      Cow::Borrowed("j | <Down Arrow Key> | <Ctrl+n>"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Move selection up"),
-      String::from("k | <Up Arrow Key> | <Ctrl+p>"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Move selection up"),
+      Cow::Borrowed("k | <Up Arrow Key> | <Ctrl+p>"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Move selection right"),
-      String::from("l | <Right Arrow Key> | <Ctrl+f>"),
-      String::from("General (Ctrl+f searches inside playlist track tables)"),
+    [
+      Cow::Borrowed("Move selection right"),
+      Cow::Borrowed("l | <Right Arrow Key> | <Ctrl+f>"),
+      Cow::Borrowed("General (Ctrl+f searches inside playlist track tables)"),
     ],
-    vec![
-      String::from("Move selection to top of list"),
-      String::from("H"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Move selection to top of list"),
+      Cow::Borrowed("H"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Move selection to middle of list"),
-      String::from("M"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Move selection to middle of list"),
+      Cow::Borrowed("M"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Move selection to bottom of list"),
-      String::from("L"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Move selection to bottom of list"),
+      Cow::Borrowed("L"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Enter input for search"),
-      key_bindings.search.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Enter input for search"),
+      Cow::Owned(key_bindings.search.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Pause/Resume playback"),
-      key_bindings.toggle_playback.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Pause/Resume playback"),
+      Cow::Owned(key_bindings.toggle_playback.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Enter active mode"),
-      String::from("<Enter>"),
-      String::from("General"),
+    [
+      Cow::Borrowed("Enter active mode"),
+      Cow::Borrowed("<Enter>"),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Go to audio analysis screen"),
-      key_bindings.audio_analysis.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Go to lyrics view"),
+      Cow::Owned(key_bindings.lyrics_view.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Go to lyrics view"),
-      key_bindings.lyrics_view.to_string(),
-      String::from("General"),
-    ],
-    vec![
-      String::from("Toggle miniplayer view"),
-      key_bindings.miniplayer_view.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Toggle miniplayer view"),
+      Cow::Owned(key_bindings.miniplayer_view.to_string()),
+      Cow::Borrowed("General"),
     ],
     #[cfg(feature = "cover-art")]
-    vec![
-      String::from("Go to cover art view"),
-      key_bindings.cover_art_view.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Go to cover art view"),
+      Cow::Owned(key_bindings.cover_art_view.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Go back or exit when nowhere left to back to"),
-      key_bindings.back.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Go back or exit when nowhere left to back to"),
+      Cow::Owned(key_bindings.back.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Select device to play music on"),
-      key_bindings.manage_devices.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Select device to play music on"),
+      Cow::Owned(key_bindings.manage_devices.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Open settings"),
-      app.effective_open_settings_key().to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Open settings"),
+      Cow::Owned(app.effective_open_settings_key().to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Save settings"),
-      app.effective_save_settings_key().to_string(),
-      String::from("Settings"),
+    [
+      Cow::Borrowed("Save settings"),
+      Cow::Owned(app.effective_save_settings_key().to_string()),
+      Cow::Borrowed("Settings"),
     ],
-    vec![
-      String::from("Enter hover mode"),
-      String::from("<Esc>"),
-      String::from("Selected block"),
+    [
+      Cow::Borrowed("Enter hover mode"),
+      Cow::Borrowed("<Esc>"),
+      Cow::Borrowed("Selected block"),
     ],
-    vec![
-      String::from("Save track in list or table"),
-      String::from("s"),
-      String::from("Selected block"),
+    [
+      Cow::Borrowed("Save track in list or table"),
+      Cow::Borrowed("s"),
+      Cow::Borrowed("Selected block"),
     ],
-    vec![
-      String::from("Add selected track to playlist"),
-      String::from("w"),
-      String::from("Track table / search songs / artist top tracks / recently played"),
+    [
+      Cow::Borrowed("Add selected track to playlist"),
+      Cow::Borrowed("w"),
+      Cow::Borrowed("Track table / search songs / artist top tracks / recently played"),
     ],
-    vec![
-      String::from("Add currently playing track to playlist"),
-      String::from("w"),
-      String::from("Playbar"),
+    [
+      Cow::Borrowed("Add currently playing track to playlist"),
+      Cow::Borrowed("w"),
+      Cow::Borrowed("Playbar"),
     ],
-    vec![
-      String::from("Quick-add currently playing track to playlist"),
-      String::from("W"),
-      String::from("Global"),
+    [
+      Cow::Borrowed("Quick-add currently playing track to playlist"),
+      Cow::Borrowed("W"),
+      Cow::Borrowed("Global"),
     ],
-    vec![
-      String::from("Decrease sidebar width"),
-      String::from("{"),
-      String::from("Layout"),
+    [
+      Cow::Borrowed("Decrease sidebar width"),
+      Cow::Borrowed("{"),
+      Cow::Borrowed("Layout"),
     ],
-    vec![
-      String::from("Increase sidebar width"),
-      String::from("}"),
-      String::from("Layout"),
+    [
+      Cow::Borrowed("Increase sidebar width"),
+      Cow::Borrowed("}"),
+      Cow::Borrowed("Layout"),
     ],
-    vec![
-      String::from("Decrease playbar or library height"),
-      String::from("("),
-      String::from("Layout"),
+    [
+      Cow::Borrowed("Decrease playbar or library height"),
+      Cow::Borrowed("("),
+      Cow::Borrowed("Layout"),
     ],
-    vec![
-      String::from("Increase playbar or library height"),
-      String::from(")"),
-      String::from("Layout"),
+    [
+      Cow::Borrowed("Increase playbar or library height"),
+      Cow::Borrowed(")"),
+      Cow::Borrowed("Layout"),
     ],
-    vec![
-      String::from("Reset layout to defaults"),
-      String::from("|"),
-      String::from("Layout"),
+    [
+      Cow::Borrowed("Reset layout to defaults"),
+      Cow::Borrowed("|"),
+      Cow::Borrowed("Layout"),
     ],
-    vec![
-      String::from("Remove selected track from current playlist"),
-      String::from("x"),
-      String::from("Track table (playlist views)"),
+    [
+      Cow::Borrowed("Remove selected track from current playlist"),
+      Cow::Borrowed("x"),
+      Cow::Borrowed("Track table (playlist views)"),
     ],
-    vec![
-      String::from("Search tracks in current playlist"),
-      String::from("<Ctrl+f>"),
-      String::from("Track table (playlist views)"),
+    [
+      Cow::Borrowed("Search tracks in current playlist"),
+      Cow::Borrowed("<Ctrl+f>"),
+      Cow::Borrowed("Track table (playlist views)"),
     ],
-    vec![
-      String::from("Clear playlist track search filter"),
-      key_bindings.back.to_string(),
-      String::from("Track table (filtered playlist views)"),
+    [
+      Cow::Borrowed("Clear playlist track search filter"),
+      Cow::Owned(key_bindings.back.to_string()),
+      Cow::Borrowed("Track table (filtered playlist views)"),
     ],
-    vec![
-      String::from("Start playback or enter album/artist/playlist"),
-      key_bindings.submit.to_string(),
-      String::from("Selected block"),
+    [
+      Cow::Borrowed("Start playback or enter album/artist/playlist"),
+      Cow::Owned(key_bindings.submit.to_string()),
+      Cow::Borrowed("Selected block"),
     ],
-    vec![
-      String::from("Play recommendations for song/artist"),
-      String::from("r"),
-      String::from("Selected block"),
+    [
+      Cow::Borrowed("Play recommendations for song/artist"),
+      Cow::Borrowed("r"),
+      Cow::Borrowed("Selected block"),
     ],
-    vec![
-      String::from("Play all tracks for artist"),
-      String::from("e"),
-      String::from("Library -> Artists"),
+    [
+      Cow::Borrowed("Play all tracks for artist"),
+      Cow::Borrowed("e"),
+      Cow::Borrowed("Library -> Artists"),
     ],
-    vec![
-      String::from("Search with input text"),
-      String::from("<Enter>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Search with input text"),
+      Cow::Borrowed("<Enter>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Move cursor one space left"),
-      String::from("<Left Arrow Key>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Move cursor one space left"),
+      Cow::Borrowed("<Left Arrow Key>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Move cursor one space right"),
-      String::from("<Right Arrow Key>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Move cursor one space right"),
+      Cow::Borrowed("<Right Arrow Key>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Delete entire input"),
-      String::from("<Ctrl+l>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Delete entire input"),
+      Cow::Borrowed("<Ctrl+l>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Delete text from cursor to start of input"),
-      String::from("<Ctrl+u>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Delete text from cursor to start of input"),
+      Cow::Borrowed("<Ctrl+u>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Delete text from cursor to end of input"),
-      String::from("<Ctrl+k>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Delete text from cursor to end of input"),
+      Cow::Borrowed("<Ctrl+k>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Delete previous word"),
-      String::from("<Ctrl+w>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Delete previous word"),
+      Cow::Borrowed("<Ctrl+w>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Jump to start of input"),
-      String::from("<Ctrl+a>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Jump to start of input"),
+      Cow::Borrowed("<Ctrl+a>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Jump to end of input"),
-      String::from("<Ctrl+e>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Jump to end of input"),
+      Cow::Borrowed("<Ctrl+e>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Escape from the input back to hovered block"),
-      String::from("<Esc>"),
-      String::from("Search input"),
+    [
+      Cow::Borrowed("Escape from the input back to hovered block"),
+      Cow::Borrowed("<Esc>"),
+      Cow::Borrowed("Search input"),
     ],
-    vec![
-      String::from("Delete saved album"),
-      String::from("D"),
-      String::from("Library -> Albums"),
+    [
+      Cow::Borrowed("Delete saved album"),
+      Cow::Borrowed("D"),
+      Cow::Borrowed("Library -> Albums"),
     ],
-    vec![
-      String::from("Delete saved playlist"),
-      String::from("D"),
-      String::from("Playlist"),
+    [
+      Cow::Borrowed("Delete saved playlist"),
+      Cow::Borrowed("D"),
+      Cow::Borrowed("Playlist"),
     ],
-    vec![
-      String::from("Follow an artist/playlist"),
-      String::from("w"),
-      String::from("Search result"),
+    [
+      Cow::Borrowed("Follow an artist/playlist"),
+      Cow::Borrowed("w"),
+      Cow::Borrowed("Search result"),
     ],
-    vec![
-      String::from("Save (like) album to library"),
-      String::from("w"),
-      String::from("Search result"),
+    [
+      Cow::Borrowed("Save (like) album to library"),
+      Cow::Borrowed("w"),
+      Cow::Borrowed("Search result"),
     ],
-    vec![
-      String::from("Play random song in playlist"),
-      String::from("S"),
-      String::from("Selected Playlist"),
+    [
+      Cow::Borrowed("Play random song in playlist"),
+      Cow::Borrowed("S"),
+      Cow::Borrowed("Selected Playlist"),
     ],
-    vec![
-      String::from("Toggle sort order of podcast episodes"),
-      String::from("S"),
-      String::from("Selected Show"),
+    [
+      Cow::Borrowed("Toggle sort order of podcast episodes"),
+      Cow::Borrowed("S"),
+      Cow::Borrowed("Selected Show"),
     ],
-    vec![
-      String::from("Add track to queue"),
-      key_bindings.add_item_to_queue.to_string(),
-      String::from("Hovered over track"),
+    [
+      Cow::Borrowed("Add track to queue"),
+      Cow::Owned(key_bindings.add_item_to_queue.to_string()),
+      Cow::Borrowed("Hovered over track"),
     ],
-    vec![
-      String::from("Show queue"),
-      key_bindings.show_queue.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Show queue"),
+      Cow::Owned(key_bindings.show_queue.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Toggle saved state for currently playing track/episode"),
-      key_bindings.like_track.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Toggle saved state for currently playing track/episode"),
+      Cow::Owned(key_bindings.like_track.to_string()),
+      Cow::Borrowed("General"),
     ],
-    vec![
-      String::from("Generate 30-day listening recap card"),
-      key_bindings.generate_recap.to_string(),
-      String::from("General"),
-    ],
-    vec![
-      String::from("Open sort menu"),
-      String::from(","),
-      String::from("Track/Album/Artist list"),
-    ],
-    vec![
-      String::from("Open Listening Party menu"),
-      key_bindings.listening_party.to_string(),
-      String::from("General"),
+    [
+      Cow::Borrowed("Open sort menu"),
+      Cow::Borrowed(","),
+      Cow::Borrowed("Track/Album/Artist list"),
     ],
   ]
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn help_docs_len_matches_generated_rows() {
+    assert_eq!(HELP_DOCS_LEN, get_help_docs(&App::default()).len());
+  }
 }

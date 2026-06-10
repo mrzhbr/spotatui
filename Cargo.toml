@@ -11,18 +11,26 @@ authors = ["LargeModGames <LargeModGames@gmail.com>"]
 edition = "2021"
 license = "MIT"
 exclude = [
-    ".github/demo.gif",
-    ".github/workflows",
-    ".github/ISSUE_TEMPLATE",
-    "target/",
-    "snap/",
+  ".github/demo.gif",
+  ".github/workflows",
+  ".github/ISSUE_TEMPLATE",
+  "target/",
+  "snap/",
 ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rspotify = { version = "0.16", default-features = false, features = ["cli", "env-file", "client-reqwest", "reqwest-rustls-tls"] }
-ratatui = { version = "0.30", features = ["crossterm", "layout-cache"], default-features = false }
+rspotify = { version = "0.16", default-features = false, features = [
+  "cli",
+  "env-file",
+  "client-reqwest",
+  "reqwest-rustls-tls",
+] }
+ratatui = { version = "0.30", features = [
+  "crossterm",
+  "layout-cache",
+], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -32,25 +40,27 @@ clap_complete = "4.6"
 unicode-width = "0.2.2"
 backtrace = "0.3.76"
 crossterm = "0.29"
-tui-equalizer = "0.2.0-alpha"
-tui-bar-graph = "0.3.3"
-colorgrad = "0.8.0"
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
 rand = "0.8.4"
 anyhow = "1.0.102"
 chrono = "0.4.44"
 log = "0.4.30"
 fern = "0.7.1"
 open = "5.3"
-self_update = { version = "0.44", features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"], optional = true }
-sha2 = { version = "0.11", optional = true }
-hex = { version = "0.4", optional = true }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
-openssl = { version = "0.10", optional = true }
-cpal = { version = "0.17", optional = true }
-realfft = { version = "3.4", optional = true }
-discord-rich-presence = { version = "1.1", optional = true }
-ratatui-image = { version = "11.0.2", optional = true, default-features = false, features = ["crossterm"] }
+reqwest = { version = "0.12", features = [
+  "json",
+  "rustls-tls",
+], default-features = false }
+ratatui-image = { version = "11.0.2", optional = true, default-features = false, features = [
+  "crossterm",
+] }
 image = { version = "0.25", optional = true }
 
 # Streaming dependencies (librespot)
@@ -65,30 +75,28 @@ librespot-oauth = { version = "0.8", optional = true }
 librespot-metadata = { version = "0.8", optional = true }
 librespot-protocol = { version = "0.8", optional = true, default-features = false }
 protobuf = { version = "3.7", optional = true }
-futures = "0.3.32"
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 url = "2.5"
-keepawake = "0.6"
 
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
 arboard = { version = "3.4", features = ["wayland-data-control"] }
-pipewire = { version = "0.10", optional = true }
-librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["alsa-backend"] }
+librespot-playback = { version = "0.8", optional = true, default-features = false, features = [
+  "alsa-backend",
+] }
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 arboard = { version = "3.4", features = ["wayland-data-control"] }
-librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["rodio-backend"] }
+librespot-playback = { version = "0.8", optional = true, default-features = false, features = [
+  "rodio-backend",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 arboard = "3.4"
 # On Windows we default to rodio for audio output.
 # Without this, librespot-playback falls back to the `pipe` sink which writes raw audio bytes
 # to stdout (breaking the TUI and producing no audible output).
-librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["rodio-backend"] }
-
-# MPRIS D-Bus support (Linux only)
-[target.'cfg(target_os = "linux")'.dependencies]
-mpris-server = { version = "0.10", optional = true }
+librespot-playback = { version = "0.8", optional = true, default-features = false, features = [
+  "rodio-backend",
+] }
 
 # macOS: librespot-playback + Now Playing / Media Key support
 # On macOS we use portaudio-backend by default to avoid the pipe sink fallback (which outputs to stdout).
@@ -96,18 +104,29 @@ mpris-server = { version = "0.10", optional = true }
 # causing SIGSEGV crashes. See Issue #9 and #20.
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = "3.4"
-librespot-playback = { version = "0.8", optional = true, default-features = false, features = ["portaudio-backend"] }
+librespot-playback = { version = "0.8", optional = true, default-features = false, features = [
+  "portaudio-backend",
+] }
 objc2-media-player = { version = "0.3", optional = true }
 objc2-foundation = { version = "0.3", optional = true }
-objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["NSImage"] }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
+  "NSImage",
+] }
 objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 
 [features]
-default = ["telemetry", "streaming", "audio-viz-cpal", "macos-media", "discord-rpc", "mpris", "self-update"]
+default = ["streaming", "macos-media", "cover-art"]
 telemetry = []
-self-update = ["dep:self_update", "dep:sha2", "dep:hex"]
-streaming = ["librespot-core", "librespot-playback", "librespot-connect", "librespot-oauth", "librespot-metadata", "librespot-protocol", "protobuf"]
+streaming = [
+  "librespot-core",
+  "librespot-playback",
+  "librespot-connect",
+  "librespot-oauth",
+  "librespot-metadata",
+  "librespot-protocol",
+  "protobuf",
+]
 # Audio backend features
 alsa-backend = ["streaming", "librespot-playback/alsa-backend"]
 pulseaudio-backend = ["streaming", "librespot-playback/pulseaudio-backend"]
@@ -117,11 +136,14 @@ jackaudio-backend = ["streaming", "librespot-playback/jackaudio-backend"]
 rodiojack-backend = ["streaming", "librespot-playback/rodiojack-backend"]
 sdl-backend = ["streaming", "librespot-playback/sdl-backend"]
 gstreamer-backend = ["streaming", "librespot-playback/gstreamer-backend"]
-audio-viz = ["realfft", "pipewire"]
-audio-viz-cpal = ["realfft", "cpal"]  # Alternative for Windows/macOS or if pipewire issues
-mpris = ["mpris-server"]  # MPRIS D-Bus integration (Linux only)
-macos-media = ["objc2-media-player", "objc2-foundation", "objc2-app-kit", "objc2", "block2", "streaming"]  # macOS Now Playing integration
-discord-rpc = ["discord-rich-presence"]
+macos-media = [
+  "objc2-media-player",
+  "objc2-foundation",
+  "objc2-app-kit",
+  "objc2",
+  "block2",
+  "streaming",
+] # macOS Now Playing integration
 cover-art = ["ratatui-image", "image"]
 
 [target.'cfg(target_env = "musl")'.dependencies]
@@ -133,10 +155,10 @@ path = "src/main.rs"
 name = "spotatui"
 
 [profile.release]
-codegen-units = 1  # Better optimization
-lto = true         # Link-time optimization
-opt-level = "s"    # Prioritize small binary size
-strip = true       # Remove debug symbols
+codegen-units = 1 # Better optimization
+lto = true        # Link-time optimization
+opt-level = "s"   # Prioritize small binary size
+strip = true      # Remove debug symbols
 
 [package.metadata.deb]
 maintainer = "LargeModGames <LargeModGames@gmail.com>"

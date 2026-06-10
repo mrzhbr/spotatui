@@ -1,6 +1,6 @@
 use super::common_key_events;
 use crate::core::app::{ActiveBlock, App};
-use crate::core::playback_target::PlaybackTarget;
+use crate::core::playback_target::PlaybackTargetRef;
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 
@@ -10,70 +10,84 @@ pub fn handler(key: Key, app: &mut App) {
       app.set_current_route_state(Some(ActiveBlock::Library), None);
     }
     k if common_key_events::down_event(k) => {
-      let targets = app.playback_targets();
-      if !targets.is_empty() {
-        if let Some(selected_device_index) = app.selected_device_index {
-          let next_index =
-            common_key_events::on_down_press_handler(&targets, Some(selected_device_index));
-          app.selected_device_index = Some(next_index);
-        }
-      }
+      move_selection_down(app);
     }
     k if common_key_events::up_event(k) => {
-      let targets = app.playback_targets();
-      if !targets.is_empty() {
-        if let Some(selected_device_index) = app.selected_device_index {
-          let next_index =
-            common_key_events::on_up_press_handler(&targets, Some(selected_device_index));
-          app.selected_device_index = Some(next_index);
-        }
-      }
+      move_selection_up(app);
     }
     k if common_key_events::high_event(k) => {
-      if !app.playback_targets().is_empty() {
-        if let Some(_selected_device_index) = app.selected_device_index {
-          let next_index = common_key_events::on_high_press_handler();
-          app.selected_device_index = Some(next_index);
-        }
+      if app.playback_target_count() > 0 && app.selected_device_index.is_some() {
+        let next_index = common_key_events::on_high_press_handler();
+        app.selected_device_index = Some(next_index);
       }
     }
     k if common_key_events::middle_event(k) => {
-      let targets = app.playback_targets();
-      if !targets.is_empty() {
-        if let Some(_selected_device_index) = app.selected_device_index {
-          let next_index = common_key_events::on_middle_press_handler(&targets);
-          app.selected_device_index = Some(next_index);
-        }
+      let target_count = app.playback_target_count();
+      if target_count > 0 && app.selected_device_index.is_some() {
+        let next_index = middle_index(target_count);
+        app.selected_device_index = Some(next_index);
       }
     }
     k if common_key_events::low_event(k) => {
-      let targets = app.playback_targets();
-      if !targets.is_empty() {
-        if let Some(_selected_device_index) = app.selected_device_index {
-          let next_index = common_key_events::on_low_press_handler(&targets);
-          app.selected_device_index = Some(next_index);
-        }
+      let target_count = app.playback_target_count();
+      if target_count > 0 && app.selected_device_index.is_some() {
+        app.selected_device_index = Some(target_count - 1);
       }
     }
     Key::Enter => {
       if let Some(index) = app.selected_device_index {
-        if let Some(target) = app.playback_targets().get(index) {
-          match target {
-            PlaybackTarget::Spotify { id, .. } => {
-              app.dispatch(IoEvent::TransferPlaybackToDevice(id.clone(), true));
-            }
-            PlaybackTarget::Sonos { room, .. } => {
-              app.dispatch(IoEvent::TransferPlaybackToSonosRoom(
-                room.uuid.clone(),
-                true,
-              ));
-            }
+        let event = app.playback_target_at(index).map(|target| match target {
+          PlaybackTargetRef::Spotify { id, .. } => {
+            IoEvent::TransferPlaybackToDevice(id.to_string(), true)
           }
+          PlaybackTargetRef::Sonos { room, .. } => {
+            IoEvent::TransferPlaybackToSonosRoom(room.uuid.clone(), true)
+          }
+        });
+
+        if let Some(event) = event {
+          app.dispatch(event);
         }
       }
     }
     _ => {}
   }
+}
+
+fn move_selection_down(app: &mut App) {
+  let target_count = app.playback_target_count();
+  if target_count == 0 {
+    return;
+  }
+
+  let next_index = app
+    .selected_device_index
+    .map(|index| (index + 1) % target_count)
+    .unwrap_or(0);
+  app.selected_device_index = Some(next_index);
+}
+
+fn move_selection_up(app: &mut App) {
+  let target_count = app.playback_target_count();
+  if target_count == 0 {
+    return;
+  }
+
+  let next_index = app
+    .selected_device_index
+    .map(|index| {
+      if index == 0 {
+        target_count - 1
+      } else {
+        index - 1
+      }
+    })
+    .unwrap_or(0);
+  app.selected_device_index = Some(next_index);
+}
+
+fn middle_index(target_count: usize) -> usize {
+  target_count.saturating_sub(1) / 2
 }
 
 #[cfg(test)]

@@ -47,26 +47,43 @@ impl SonosNowPlaying {
   }
 }
 
-impl PlaybackTarget {
-  pub fn label(&self) -> String {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackTargetRef<'a> {
+  Spotify {
+    id: &'a str,
+    name: &'a str,
+    is_active: bool,
+  },
+  Sonos {
+    room: &'a SonosRoom,
+    is_selected: bool,
+  },
+}
+
+impl PlaybackTargetRef<'_> {
+  pub fn label(self) -> String {
     match self {
-      PlaybackTarget::Spotify {
+      PlaybackTargetRef::Spotify {
         name, is_active, ..
-      } => {
-        if *is_active {
-          format!("{name} (Spotify, active)")
-        } else {
-          format!("{name} (Spotify)")
-        }
-      }
-      PlaybackTarget::Sonos { room, is_selected } => {
-        if *is_selected {
-          format!("{} (Sonos, selected)", room.name)
-        } else {
-          format!("{} (Sonos)", room.name)
-        }
-      }
+      } => spotify_target_label(name, is_active),
+      PlaybackTargetRef::Sonos { room, is_selected } => sonos_target_label(&room.name, is_selected),
     }
+  }
+}
+
+fn spotify_target_label(name: &str, is_active: bool) -> String {
+  if is_active {
+    format!("{name} (Spotify, active)")
+  } else {
+    format!("{name} (Spotify)")
+  }
+}
+
+fn sonos_target_label(name: &str, is_selected: bool) -> String {
+  if is_selected {
+    format!("{name} (Sonos, selected)")
+  } else {
+    format!("{name} (Sonos)")
   }
 }
 

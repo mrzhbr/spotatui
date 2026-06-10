@@ -184,14 +184,6 @@ fn handle_string_edit(key: Key, app: &mut App) {
       if let Some(setting) = app.settings_items.get_mut(app.settings_selected_index) {
         let new_value = app.settings_edit_buffer.clone();
 
-        #[cfg(feature = "self-update")]
-        if setting.id == "behavior.auto_update_delay" {
-          if let Err(e) = crate::core::user_config::parse_update_delay_secs(&new_value) {
-            app.handle_error(anyhow::anyhow!("Invalid delay format: {}", e));
-            return;
-          }
-        }
-
         let is_color_edit = matches!(setting.value, SettingValue::Color(_));
         match &setting.value {
           SettingValue::String(_) => {

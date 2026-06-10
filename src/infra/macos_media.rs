@@ -253,7 +253,7 @@ impl MacMediaManager {
       .send(MacMediaCommand::SetPosition(position_ms));
   }
 
-  /// Update volume (0-100) - kept for API parity with MPRIS
+  /// Update volume (0-100).
   #[allow(dead_code)]
   pub fn set_volume(&self, volume_percent: u8) {
     let _ = self

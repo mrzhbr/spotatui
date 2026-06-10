@@ -96,11 +96,16 @@ impl Events {
           }
         }
 
-        // If send fails, the receiver has been dropped (app is closing)
+        // If send fails, the receiver has been dropped (app is closing).
+        // Do not emit an extra tick after every input event; rapid keyboard or
+        // mouse input should not force avoidable app updates/redraws before the
+        // configured interval has elapsed.
         let elapsed = last_tick.elapsed();
-        last_tick = Instant::now();
-        if event_tx.send(Event::Tick(elapsed)).is_err() {
-          break;
+        if elapsed >= tick_rate {
+          last_tick = Instant::now();
+          if event_tx.send(Event::Tick(elapsed)).is_err() {
+            break;
+          }
         }
       }
     });

@@ -7,7 +7,9 @@ use ratatui::{
 
 use super::{
   search::draw_input_and_help_box,
-  util::{draw_selectable_list, SMALL_TERMINAL_WIDTH},
+  util::{
+    draw_selectable_list, draw_selectable_list_with, SelectableListOptions, SMALL_TERMINAL_WIDTH,
+  },
 };
 
 pub fn draw_library_block(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
@@ -28,34 +30,12 @@ pub fn draw_library_block(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
 }
 
 pub fn draw_playlist_block(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
-  let display_items = app.get_playlist_display_items();
-
-  let playlist_items: Vec<String> = if app.playlist_folder_items.is_empty() {
-    // Fallback only when folder-aware items are not initialized yet
-    match &app.playlists {
-      Some(p) => p.items.iter().map(|item| item.name.to_owned()).collect(),
-      None => vec![],
-    }
+  let playlist_count = if app.playlist_folder_items.is_empty() {
+    app.playlists.as_ref().map(|p| p.items.len()).unwrap_or(0)
   } else {
-    display_items
-      .iter()
-      .map(|item| match item {
-        crate::core::app::PlaylistFolderItem::Folder(folder) => {
-          if folder.name.starts_with('\u{2190}') {
-            // Back entry (already has arrow prefix)
-            folder.name.clone()
-          } else {
-            format!("\u{1F4C1} {}", folder.name)
-          }
-        }
-        crate::core::app::PlaylistFolderItem::Playlist { index, .. } => app
-          .all_playlists
-          .get(*index)
-          .map(|p| p.name.clone())
-          .unwrap_or_else(|| "Unknown".to_string()),
-      })
-      .collect()
+    app.get_playlist_display_count()
   };
+  let item_count = playlist_count.saturating_add(1);
 
   let current_route = app.get_current_route();
 
@@ -64,18 +44,49 @@ pub fn draw_playlist_block(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
     current_route.hovered_block == ActiveBlock::MyPlaylists,
   );
 
-  let mut display_list = playlist_items;
-  display_list.push("+ Add Playlist".to_string());
-
-  draw_selectable_list(
+  draw_selectable_list_with(
     f,
     app,
     layout_chunk,
-    "Playlists",
-    &display_list,
-    highlight_state,
-    app.selected_playlist_index,
+    SelectableListOptions {
+      title: "Playlists",
+      item_count,
+      highlight_state,
+      selected_index: app.selected_playlist_index,
+    },
+    |index| playlist_display_text(app, index, playlist_count),
   );
+}
+
+fn playlist_display_text(app: &App, index: usize, playlist_count: usize) -> String {
+  if index == playlist_count {
+    return "+ Add Playlist".to_string();
+  }
+
+  if app.playlist_folder_items.is_empty() {
+    return app
+      .playlists
+      .as_ref()
+      .and_then(|playlists| playlists.items.get(index))
+      .map(|playlist| playlist.name.clone())
+      .unwrap_or_else(|| "Unknown".to_string());
+  }
+
+  match app.get_playlist_display_item_at(index) {
+    Some(crate::core::app::PlaylistFolderItem::Folder(folder)) => {
+      if folder.name.starts_with('\u{2190}') {
+        folder.name.clone()
+      } else {
+        format!("\u{1F4C1} {}", folder.name)
+      }
+    }
+    Some(crate::core::app::PlaylistFolderItem::Playlist { index, .. }) => app
+      .all_playlists
+      .get(*index)
+      .map(|playlist| playlist.name.clone())
+      .unwrap_or_else(|| "Unknown".to_string()),
+    None => "Unknown".to_string(),
+  }
 }
 
 pub fn draw_user_block(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {

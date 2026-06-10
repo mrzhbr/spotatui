@@ -42,36 +42,24 @@ pub fn handler(key: Key, app: &mut App) {
         app.dispatch(IoEvent::GetRecentlyPlayed);
         app.push_navigation_stack(RouteId::RecentlyPlayed, ActiveBlock::RecentlyPlayed);
       }
-      // Friends
-      2 => {
-        app.push_navigation_stack(RouteId::Friends, ActiveBlock::Friends);
-        // Load friend code + friends list on first open (or if empty)
-        if app.friend_code.is_none() {
-          app.dispatch(IoEvent::GetFriendCode);
-        }
-        if app.friends.is_empty() && !app.friends_loading {
-          app.dispatch(IoEvent::GetFriends);
-        }
-        app.last_friends_refresh_at = std::time::Instant::now();
-      }
       // Liked Songs
-      3 => {
+      2 => {
         app.reset_saved_tracks_view();
         app.dispatch(IoEvent::GetCurrentSavedTracks(None));
         app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
       }
       // Albums
-      4 => {
+      3 => {
         app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
         app.push_navigation_stack(RouteId::AlbumList, ActiveBlock::AlbumList);
       }
       // Artists
-      5 => {
+      4 => {
         app.dispatch(IoEvent::GetFollowedArtists(None));
         app.push_navigation_stack(RouteId::Artists, ActiveBlock::Artists);
       }
       // Podcasts
-      6 => {
+      5 => {
         app.dispatch(IoEvent::GetCurrentUserSavedShows(None));
         app.push_navigation_stack(RouteId::Podcasts, ActiveBlock::Podcasts);
       }

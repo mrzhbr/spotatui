@@ -1,11 +1,13 @@
 use crate::core::app::{App, SettingValue, SettingsCategory};
+use crate::tui::ui::util::selectable_list_scroll_offset;
 use ratatui::{
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
+  widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs},
   Frame,
 };
+use std::borrow::Cow;
 
 const UNSAVED_PROMPT_WIDTH: u16 = 58;
 const UNSAVED_PROMPT_HEIGHT: u16 = 9;
@@ -30,12 +32,10 @@ pub fn draw_settings(f: &mut Frame<'_>, app: &App) {
 }
 
 fn draw_category_tabs(f: &mut Frame<'_>, app: &App, area: Rect) {
-  let titles: Vec<Line> = SettingsCategory::all()
-    .iter()
-    .map(|cat| Line::from(cat.name()))
-    .collect();
-
   let selected = app.settings_category.index();
+  let titles = SettingsCategory::all()
+    .iter()
+    .map(|cat| Line::from(cat.name()));
 
   let tabs = Tabs::new(titles)
     .select(selected)
@@ -55,55 +55,60 @@ fn draw_category_tabs(f: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_settings_list(f: &mut Frame<'_>, app: &App, area: Rect) {
-  let items: Vec<ListItem> = app
+  let visible_rows = area.height.saturating_sub(2) as usize;
+  let offset = selectable_list_scroll_offset(app.settings_selected_index, visible_rows);
+  let selected_visible_index = app.settings_selected_index.checked_sub(offset);
+
+  let visible_items = app
     .settings_items
     .iter()
     .enumerate()
+    .skip(offset)
+    .take(visible_rows.saturating_add(1))
     .map(|(i, setting)| {
       let is_selected = i == app.settings_selected_index;
       let is_editing = is_selected && app.settings_edit_mode;
 
       // Format the value display
-      let value_str = if is_editing {
+      let value_str: Cow<'_, str> = if is_editing {
         match &setting.value {
           SettingValue::Bool(v) => {
             // Show toggle state (shouldn't reach here with new logic, but just in case)
-            if *v {
+            Cow::Borrowed(if *v {
               "[●] On  [ ] Off"
             } else {
               "[ ] On  [●] Off"
-            }
-            .to_string()
+            })
           }
           _ => {
             // Show edit buffer with cursor
-            format!("{}▏", app.settings_edit_buffer)
+            Cow::Owned(format!("{}▏", app.settings_edit_buffer))
           }
         }
       } else {
         match &setting.value {
           SettingValue::Bool(v) => {
             // Show toggle indicator - pressing Enter will toggle
-            if *v { "[●] On" } else { "[○] Off" }.to_string()
+            Cow::Borrowed(if *v { "[●] On" } else { "[○] Off" })
           }
-          SettingValue::Number(v) => v.to_string(),
-          SettingValue::String(v) => format!("\"{}\"", v),
+          SettingValue::Number(v) => Cow::Owned(v.to_string()),
+          SettingValue::String(v) => Cow::Owned(format!("\"{}\"", v)),
           SettingValue::Key(v) => {
             if setting.id == "keys.open_settings" {
               let effective = app.effective_open_settings_key();
               let configured = app.user_config.keys.open_settings;
               if effective != configured {
-                format!("[{}] (effective: {})", v, effective)
+                Cow::Owned(format!("[{}] (effective: {})", v, effective))
               } else {
-                format!("[{}]", v)
+                Cow::Owned(format!("[{}]", v))
               }
             } else {
-              format!("[{}]", v)
+              Cow::Owned(format!("[{}]", v))
             }
           }
-          SettingValue::Color(v) => format!("■ {}", v),
-          SettingValue::Preset(v) => format!("◆ {} ◆", v), // Show preset name with arrows hint
-          SettingValue::Cycle(v, _) => format!("◆ {} ◆", v),
+          SettingValue::Color(v) => Cow::Owned(format!("■ {}", v)),
+          SettingValue::Preset(v) => Cow::Owned(format!("◆ {} ◆", v)), // Show preset name with arrows hint
+          SettingValue::Cycle(v, _) => Cow::Owned(format!("◆ {} ◆", v)),
         }
       };
 
@@ -127,13 +132,13 @@ fn draw_settings_list(f: &mut Frame<'_>, app: &App, area: Rect) {
       };
 
       let line = Line::from(vec![
-        Span::styled(format!("{}: ", setting.name), name_style),
+        Span::styled(setting.name.as_str(), name_style),
+        Span::styled(": ", name_style),
         Span::styled(value_str, value_style),
       ]);
 
       ListItem::new(line)
-    })
-    .collect();
+    });
 
   let title = format!(
     "{} Settings ({} items)",
@@ -141,7 +146,10 @@ fn draw_settings_list(f: &mut Frame<'_>, app: &App, area: Rect) {
     app.settings_items.len()
   );
 
-  let list = List::new(items)
+  let mut state = ListState::default();
+  state.select(selected_visible_index);
+
+  let list = List::new(visible_items)
     .block(
       Block::default()
         .borders(Borders::ALL)
@@ -162,10 +170,10 @@ fn draw_settings_list(f: &mut Frame<'_>, app: &App, area: Rect) {
       ),
     );
 
-  f.render_widget(list, area);
+  f.render_stateful_widget(list, area, &mut state);
 }
 
-fn format_terminal_input_caps(app: &App) -> String {
+fn append_terminal_input_caps(out: &mut String, app: &App) {
   let enhancement = if app.terminal_input_caps.keyboard_enhancement_enabled {
     "enh:on"
   } else if app.terminal_input_caps.keyboard_enhancement_supported {
@@ -180,12 +188,15 @@ fn format_terminal_input_caps(app: &App) -> String {
     crate::core::app::CapabilityState::Unknown => "ctrl+,=unknown",
   };
 
-  format!("Terminal Input: {} | {}", enhancement, ctrl_comma)
+  out.push_str("Terminal Input: ");
+  out.push_str(enhancement);
+  out.push_str(" | ");
+  out.push_str(ctrl_comma);
 }
 
 fn draw_settings_help(f: &mut Frame<'_>, app: &App, area: Rect) {
-  let controls_line = if app.settings_edit_mode {
-    match app.settings_items.get(app.settings_selected_index) {
+  let controls_line: Cow<'_, str> = if app.settings_edit_mode {
+    Cow::Borrowed(match app.settings_items.get(app.settings_selected_index) {
       Some(setting) => match &setting.value {
         SettingValue::Bool(_) => "Space/Enter: Toggle | ←/→: Toggle | Esc: Cancel",
         SettingValue::Number(_) => {
@@ -198,14 +209,16 @@ fn draw_settings_help(f: &mut Frame<'_>, app: &App, area: Rect) {
         _ => "Type to edit | Enter: Confirm | Esc: Cancel",
       },
       None => "",
-    }
+    })
   } else {
-    &format!(
+    Cow::Owned(format!(
       "↑/↓: Select | ←/→: Switch Tab | Enter: Toggle/Edit | Mouse: Click/Scroll | {}: Save | Esc/q: Exit",
       app.effective_save_settings_key()
-    )
+    ))
   };
-  let help_text = format!("{}\n{}", controls_line, format_terminal_input_caps(app));
+  let mut help_text = controls_line.into_owned();
+  help_text.push('\n');
+  append_terminal_input_caps(&mut help_text, app);
 
   let help = Paragraph::new(help_text)
     .style(
