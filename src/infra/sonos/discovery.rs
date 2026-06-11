@@ -1,33 +1,40 @@
 use crate::core::playback_target::SonosRoom;
 use anyhow::{anyhow, Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 const SSDP_ADDR: &str = "239.255.255.250:1900";
-const SONOS_ST: &str = "urn:schemas-upnp-org:device:ZonePlayer:1";
-const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2_000);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(3_000);
+const SONOS_SEARCH_TARGETS: &[&str] = &[
+  "urn:schemas-upnp-org:device:ZonePlayer:1",
+  "urn:schemas-upnp-org:device:ZonePlayer:2",
+  "urn:schemas-upnp-org:device:MediaRenderer:1",
+  "urn:schemas-upnp-org:service:AVTransport:1",
+  "upnp:rootdevice",
+  "ssdp:all",
+];
+const SSDP_SEARCH_BURSTS: usize = 2;
 
 pub async fn discover_rooms() -> Result<Vec<SonosRoom>> {
   let socket = UdpSocket::bind("0.0.0.0:0")
     .await
     .context("failed to bind SSDP socket")?;
-  let request = format!(
-    "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP_ADDR}\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {SONOS_ST}\r\n\r\n"
-  );
+  for _ in 0..SSDP_SEARCH_BURSTS {
+    for search_target in SONOS_SEARCH_TARGETS {
+      let request = ssdp_search_request(search_target);
+      socket
+        .send_to(request.as_bytes(), SSDP_ADDR)
+        .await
+        .with_context(|| {
+          format!("failed to send Sonos SSDP discovery request for {search_target}")
+        })?;
+    }
+  }
 
-  socket
-    .send_to(request.as_bytes(), SSDP_ADDR)
-    .await
-    .context("failed to send Sonos SSDP discovery request")?;
-
-  let client = reqwest::Client::builder()
-    .timeout(Duration::from_secs(2))
-    .build()
-    .context("failed to build Sonos discovery HTTP client")?;
   let deadline = Instant::now() + DISCOVERY_TIMEOUT;
   let mut buf = vec![0_u8; 4096];
-  let mut rooms_by_uuid = HashMap::new();
+  let mut locations = HashSet::new();
 
   loop {
     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -43,7 +50,17 @@ pub async fn discover_rooms() -> Result<Vec<SonosRoom>> {
       continue;
     };
 
-    match room_from_device_description(&client, location).await {
+    locations.insert(location.to_string());
+  }
+
+  let client = reqwest::Client::builder()
+    .timeout(Duration::from_secs(2))
+    .build()
+    .context("failed to build Sonos discovery HTTP client")?;
+  let mut rooms_by_uuid = HashMap::new();
+
+  for location in locations {
+    match room_from_device_description(&client, &location).await {
       Ok(room) => {
         rooms_by_uuid.entry(room.uuid.clone()).or_insert(room);
       }
@@ -89,6 +106,12 @@ pub fn parse_device_description(location: &str, xml: &str) -> Result<SonosRoom> 
   })
 }
 
+pub fn ssdp_search_request(search_target: &str) -> String {
+  format!(
+    "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP_ADDR}\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {search_target}\r\n\r\n"
+  )
+}
+
 pub fn ssdp_header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
   response.lines().find_map(|line| {
     let (key, value) = line.split_once(':')?;
@@ -120,6 +143,16 @@ fn unescape_xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn builds_ssdp_search_request_for_target() {
+    let request = ssdp_search_request("ssdp:all");
+
+    assert!(request.contains("M-SEARCH * HTTP/1.1"));
+    assert!(request.contains("HOST: 239.255.255.250:1900"));
+    assert!(request.contains("MAN: \"ssdp:discover\""));
+    assert!(request.contains("ST: ssdp:all"));
+  }
 
   #[test]
   fn parses_ssdp_location_case_insensitively() {

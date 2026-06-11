@@ -131,14 +131,18 @@ impl UserNetwork for Network {
     if let Some(sonos_rooms) = sonos_rooms {
       match sonos_rooms {
         Ok(rooms) => {
-          if !rooms.is_empty() {
+          if rooms.is_empty() {
+            app.set_status_message(
+              "No Sonos rooms found via SSDP; showing Spotify devices only".to_string(),
+              6,
+            );
+          } else {
             app.sonos_rooms = rooms;
           }
         }
-        Err(e) if app.selected_sonos_room_uuid.is_some() => {
+        Err(e) => {
           app.set_status_message(format!("No Sonos rooms found via SSDP: {e}"), 6);
         }
-        Err(_) => {}
       }
     }
 
