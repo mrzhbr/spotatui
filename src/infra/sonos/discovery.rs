@@ -98,12 +98,26 @@ pub fn parse_device_description(location: &str, xml: &str) -> Result<SonosRoom> 
   let udn = xml_text(xml, "UDN")
     .ok_or_else(|| anyhow!("Sonos device description did not include a UDN"))?;
   let uuid = udn.strip_prefix("uuid:").unwrap_or(&udn).to_string();
+  if !is_sonos_device_description(xml, &uuid) {
+    return Err(anyhow!("UPnP device is not a Sonos speaker"));
+  }
 
   Ok(SonosRoom {
     uuid,
     name,
     location: location.to_string(),
   })
+}
+
+fn is_sonos_device_description(xml: &str, uuid: &str) -> bool {
+  uuid.starts_with("RINCON_")
+    || xml_text(xml, "manufacturer").is_some_and(|value| contains_sonos(&value))
+    || xml_text(xml, "modelName").is_some_and(|value| contains_sonos(&value))
+    || xml_text(xml, "modelDescription").is_some_and(|value| contains_sonos(&value))
+}
+
+fn contains_sonos(value: &str) -> bool {
+  value.to_ascii_lowercase().contains("sonos")
 }
 
 pub fn ssdp_search_request(search_target: &str) -> String {
@@ -176,6 +190,39 @@ mod tests {
       room.location,
       "http://192.168.1.20:1400/xml/device_description.xml"
     );
+  }
+
+  #[test]
+  fn parses_sonos_description_by_manufacturer_when_udn_is_not_rincon() {
+    let xml = r#"
+      <root><device>
+        <friendlyName>Bedroom</friendlyName>
+        <manufacturer>Sonos, Inc.</manufacturer>
+        <UDN>uuid:portable-sonos-device</UDN>
+      </device></root>
+    "#;
+
+    let room =
+      parse_device_description("http://192.168.1.21:1400/xml/device_description.xml", xml).unwrap();
+
+    assert_eq!(room.name, "Bedroom");
+    assert_eq!(room.uuid, "portable-sonos-device");
+  }
+
+  #[test]
+  fn rejects_non_sonos_upnp_devices() {
+    let xml = r#"
+      <root><device>
+        <friendlyName>Gira G1 (192.168.2.89 00:0a:b3:20:c8:af)</friendlyName>
+        <manufacturer>Gira</manufacturer>
+        <modelName>G1</modelName>
+        <UDN>uuid:gira-g1</UDN>
+      </device></root>
+    "#;
+
+    let err = parse_device_description("http://192.168.2.89/device.xml", xml).unwrap_err();
+
+    assert!(err.to_string().contains("not a Sonos"));
   }
 
   #[test]
